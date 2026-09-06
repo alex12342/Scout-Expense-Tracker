@@ -1,0 +1,45 @@
+# =============================================================================
+# Trailhead Ledger — Unraid / docker-compose deployment
+# Single container. Map one host port to :80. Data persists in ./data.
+# =============================================================================
+services:
+  scout-expense-tracker:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_SHA: ${GIT_SHA:-dev}
+    image: scout-expense-tracker:${VERSION:-dev}
+    container_name: scout-expense-tracker
+    restart: unless-stopped
+    # Runs as root inside; entrypoint drops privileges per-process (postgres
+    # runs as the `postgres` user, nginx workers as www-data).
+    ports:
+      - "${HOST_PORT:-8080}:80"
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - NODE_ENV=production
+      - PORT=8080
+      - DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scout_expense_tracker
+      - DB_NAME=scout_expense_tracker
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Optional: pin the JWT secret. Leave unset to auto-generate + persist.
+      # - JWT_SECRET=${JWT_SECRET:-}
+      # First-run admin seed (only used when the users table is empty).
+      - DEFAULT_ADMIN_USERNAME=${DEFAULT_ADMIN_USERNAME:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-ChangeMe123!}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,17 @@
+{
+  "name": "scout-expense-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "dev:api": "pnpm --filter @scout-expense-tracker/api-server dev",
+    "dev:web": "pnpm --filter @scout-expense-tracker/web dev"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "~5.9.3"
+  }
+}

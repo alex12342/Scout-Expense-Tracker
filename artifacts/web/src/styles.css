@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Bricolage Grotesque", "Instrument Sans", ui-sans-serif,
+    system-ui, sans-serif;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Trailhead Ledger palette — field greens on warm paper */
+  --color-canvas: #f4f3eb;
+  --color-surface: #fcfbf6;
+  --color-ink: #1f2a22;
+  --color-ink-soft: #46524a;
+  --color-muted: #6b7a6e;
+  --color-pine: #2e5339;
+  --color-pine-deep: #234230;
+  --color-pine-soft: #e3e9dd;
+  --color-moss: #5b7b4e;
+  --color-moss-soft: #e8eddf;
+  --color-ember: #c2542b;
+  --color-ember-soft: #f3e1d7;
+  --color-gold: #a97f1f;
+  --color-gold-soft: #f0e6cb;
+  --color-line: #d9d4c2;
+  --color-line-soft: #e8e4d6;
+
+  --shadow-lift:
+    0 1px 2px rgb(31 42 34 / 0.05), 0 10px 28px -14px rgb(31 42 34 / 0.22);
+  --shadow-card:
+    0 1px 1px rgb(31 42 34 / 0.04), 0 4px 14px -8px rgb(31 42 34 / 0.12);
+
+  --animate-rise: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-fadein: fadein 0.4s ease both;
+  --animate-contour: contour 1.2s ease both;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes fadein {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes contour {
+    from {
+      opacity: 0;
+      transform: scale(1.02);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-canvas text-ink font-sans antialiased;
+  font-feature-settings: "ss01";
+}
+
+/* Tabular numerals everywhere money shows up */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Subtle paper grain via layered gradients — cheap, no image assets */
+.paper {
+  background-image:
+    radial-gradient(
+      ellipse 80% 60% at 50% -10%,
+      rgb(46 83 57 / 0.05),
+      transparent 60%
+    );
+}
+
+::selection {
+  background: rgb(46 83 57 / 0.22);
+}
+
+/* Thin, quiet scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(107 122 110 / 0.35) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(107 122 110 / 0.35);
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

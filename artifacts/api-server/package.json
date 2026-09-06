@@ -1,0 +1,38 @@
+{
+  "name": "@scout-expense-tracker/api-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development tsx watch src/index.ts",
+    "build": "node ./build.mjs",
+    "start": "node --enable-source-maps ./dist/index.mjs",
+    "seed": "node ./dist/seed-admin.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@scout-expense-tracker/db": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "catalog:",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.20.0",
+    "pino": "^9.14.0",
+    "pino-http": "^10.5.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.4",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "catalog:",
+    "@types/pg": "^8.20.0",
+    "esbuild": "0.27.3",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3"
+  }
+}

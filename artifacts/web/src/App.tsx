@@ -46,9 +46,6 @@ export default function App() {
         <Route path="/login">
           <LoginPage />
         </Route>
-        <Route path="/">
-          <RedirectNote text="Please sign in to continue." to="/login" />
-        </Route>
         <Route>
           <RedirectNote text="Please sign in to continue." to="/login" />
         </Route>
@@ -61,7 +58,7 @@ export default function App() {
       <Route path="/login">
         <RedirectNote text="You are signed in — taking you to the dashboard." to="/" />
       </Route>
-      <Route path="/">
+      <Route>
         <AppShell>
           <Switch>
             <Route path="/scouts">

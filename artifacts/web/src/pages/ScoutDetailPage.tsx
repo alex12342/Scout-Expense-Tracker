@@ -30,6 +30,7 @@ export default function ScoutDetailPage() {
   const { toast } = useToast();
   const [showAddTx, setShowAddTx] = useState(false);
   const [txType, setTxType] = useState("scout_deposit");
+  const [txAccountId, setTxAccountId] = useState("");
   const [txAmount, setTxAmount] = useState("");
   const [txDesc, setTxDesc] = useState("");
 
@@ -52,11 +53,12 @@ export default function ScoutDetailPage() {
     mutationFn: () => {
       const cents = parseMoney(txAmount);
       if (cents === null || cents === 0) throw new Error("Enter a valid amount");
+      const needsAccount = txType === "scout_deposit" || txType === "reimbursement";
       return api.createTransaction({
         type: txType,
         amount: Math.abs(cents) / 100,
         scoutId: id,
-        bankAccountId: txType === "scout_deposit" || txType === "reimbursement" ? accounts?.[0]?.id : undefined,
+        bankAccountId: needsAccount ? (txAccountId || accounts?.[0]?.id) : undefined,
         description: txDesc || undefined,
       });
     },
@@ -68,6 +70,7 @@ export default function ScoutDetailPage() {
       setShowAddTx(false);
       setTxAmount("");
       setTxDesc("");
+      setTxAccountId("");
     },
     onError: (err) => toast(err.message, "error"),
   });
@@ -170,6 +173,14 @@ export default function ScoutDetailPage() {
               { value: "scout_adjustment", label: "Adjustment (correction)" },
             ]}
           />
+          {(txType === "scout_deposit" || txType === "reimbursement") && accounts && accounts.length > 0 && (
+            <Select
+              label="Bank Account"
+              value={txAccountId || accounts[0]?.id || ""}
+              onChange={(e) => setTxAccountId(e.target.value)}
+              options={accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.accountType})` }))}
+            />
+          )}
           <Input
             label="Amount ($)"
             type="number"

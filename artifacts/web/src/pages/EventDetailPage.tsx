@@ -42,7 +42,9 @@ export default function EventDetailPage() {
     queryKey: ["bank-accounts"],
     queryFn: () => api.listAccounts(),
   });
-  const [payAccountId, setPayAccountId] = useState(accounts?.[0]?.id ?? "");
+  const [payAccountId, setPayAccountId] = useState("");
+
+  const effectiveAccountId = payAccountId || accounts?.[0]?.id || "";
 
   const payMut = useMutation({
     mutationFn: () => {
@@ -51,7 +53,7 @@ export default function EventDetailPage() {
       return api.recordPayment(id!, {
         scoutId: payScoutId!,
         amount: amt,
-        bankAccountId: payAccountId || undefined,
+        bankAccountId: effectiveAccountId || undefined,
       });
     },
     onSuccess: () => {
@@ -72,7 +74,7 @@ export default function EventDetailPage() {
       return api.recordRefund(id!, {
         scoutId: refundScoutId!,
         amount: amt,
-        bankAccountId: payAccountId || undefined,
+        bankAccountId: effectiveAccountId || undefined,
       });
     },
     onSuccess: () => {
@@ -250,7 +252,7 @@ export default function EventDetailPage() {
           {accounts && accounts.length > 0 && (
             <Select
               label="Deposit To"
-              value={payAccountId}
+              value={effectiveAccountId}
               onChange={(e) => setPayAccountId(e.target.value)}
               options={accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.accountType})` }))}
             />

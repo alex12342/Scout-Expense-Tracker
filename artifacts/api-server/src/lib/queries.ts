@@ -2,10 +2,11 @@ import {
   db,
   transactionsTable,
   scoutsTable,
+  leadersTable,
   bankAccountsTable,
 } from "@scout-expense-tracker/db";
 import { sql, and, eq } from "drizzle-orm";
-import type { Transaction, Scout, BankAccount } from "@scout-expense-tracker/db";
+import type { Transaction, Scout, BankAccount, Leader } from "@scout-expense-tracker/db";
 
 /** Scout balance = SUM(amountCents) over the scout's ledger. */
 export async function getScoutBalance(scoutId: string): Promise<number> {
@@ -15,6 +16,17 @@ export async function getScoutBalance(scoutId: string): Promise<number> {
     })
     .from(transactionsTable)
     .where(eq(transactionsTable.scoutId, scoutId));
+  return Number(row?.total ?? 0);
+}
+
+/** Leader balance = SUM(amountCents) over the leader's ledger. */
+export async function getLeaderBalance(leaderId: string): Promise<number> {
+  const [row] = await db
+    .select({
+      total: sql<number>`coalesce(sum(${transactionsTable.amountCents}), 0)`,
+    })
+    .from(transactionsTable)
+    .where(eq(transactionsTable.leaderId, leaderId));
   return Number(row?.total ?? 0);
 }
 
@@ -52,18 +64,22 @@ export async function listBankAccountsWithBalances(): Promise<
 
 export async function listLedger(opts?: {
   scoutId?: string;
+  leaderId?: string;
   bankAccountId?: string;
   limit?: number;
   offset?: number;
 }): Promise<
   (Transaction & {
     scoutName: string | null;
+    leaderName: string | null;
     bankAccountName: string | null;
   })[]
 > {
   const conditions = [];
   if (opts?.scoutId)
     conditions.push(eq(transactionsTable.scoutId, opts.scoutId));
+  if (opts?.leaderId)
+    conditions.push(eq(transactionsTable.leaderId, opts.leaderId));
   if (opts?.bankAccountId)
     conditions.push(eq(transactionsTable.bankAccountId, opts.bankAccountId));
 
@@ -71,12 +87,17 @@ export async function listLedger(opts?: {
     .select({
       tx: transactionsTable,
       scoutName: scoutsTable.name,
+      leaderName: leadersTable.name,
       bankAccountName: bankAccountsTable.name,
     })
     .from(transactionsTable)
     .leftJoin(
       scoutsTable,
       eq(transactionsTable.scoutId, scoutsTable.id),
+    )
+    .leftJoin(
+      leadersTable,
+      eq(transactionsTable.leaderId, leadersTable.id),
     )
     .leftJoin(
       bankAccountsTable,
@@ -90,6 +111,7 @@ export async function listLedger(opts?: {
   return rows.map((r) => ({
     ...r.tx,
     scoutName: r.scoutName,
+    leaderName: r.leaderName,
     bankAccountName: r.bankAccountName,
   }));
 }

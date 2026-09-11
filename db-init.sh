@@ -44,6 +44,19 @@ else
   exit 1
 fi
 
+# --- One-time backfill: split legacy scouts.name into first/last (idempotent) --
+# New schema columns (first_name/last_name/age) were added by the push above.
+# For rows that still have an empty first_name, derive it from the legacy
+# combined `name` (first word -> first_name, remainder -> last_name). The
+# `name` column is preserved (kept in sync by the API). Safe to run every boot.
+echo "[db-init] Backfilling scout first/last names (no-op if already set)..."
+sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
+UPDATE scouts
+SET first_name = split_part(btrim(name), ' ', 1),
+    last_name  = regexp_replace(btrim(name), '^\S+\s*', '')
+WHERE btrim(first_name) = '' AND btrim(name) <> '';
+SQL
+
 # --- Seed the initial admin (no-op if users already exist) ------------------
 echo "[db-init] Seeding admin user (no-op if present)..."
 if node /app/artifacts/api-server/dist/seed-admin.mjs; then

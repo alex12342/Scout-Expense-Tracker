@@ -1,6 +1,7 @@
 import { pgTable, varchar, timestamp, integer, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { scoutsTable } from "./scouts";
+import { leadersTable } from "./leaders";
 import { bankAccountsTable } from "./bankAccounts";
 import { eventsTable, eventParticipantsTable } from "./events";
 import { usersTable } from "./users";
@@ -25,10 +26,11 @@ import { usersTable } from "./users";
  *   bank_adjustment    —              ± (correction)
  *   scout_adjustment   ± (correction) —
  *
- * Scout balance  = SUM(amountCents) WHERE scout_id = X
+ * Scout balance   = SUM(amountCents) WHERE scout_id = X
  *   -> positive: troop owes the scout (credit)
  *   -> negative: the scout owes the troop
- * Bank balance   = SUM(amountCents) WHERE bank_account_id = Y
+ * Leader balance  = SUM(amountCents) WHERE leader_id = Y  (same convention)
+ * Bank balance    = SUM(amountCents) WHERE bank_account_id = Z
  */
 export const TRANSACTION_TYPES = [
   "opening_balance",
@@ -40,6 +42,9 @@ export const TRANSACTION_TYPES = [
   "bank_expense",
   "bank_adjustment",
   "scout_adjustment",
+  "dues_payment",
+  "dues_refund",
+  "dues_assessed",
 ] as const;
 export type TransactionType = (typeof TRANSACTION_TYPES)[number];
 
@@ -58,6 +63,10 @@ export const transactionsTable = pgTable("transactions", {
   amountCents: integer("amount_cents").notNull(),
   // Which ledgers this row touches. A row may touch one or both.
   scoutId: uuid("scout_id").references(() => scoutsTable.id, {
+    onDelete: "set null",
+  }),
+  // A leader (adult volunteer) ledger entry, parallel to scoutId.
+  leaderId: uuid("leader_id").references(() => leadersTable.id, {
     onDelete: "set null",
   }),
   bankAccountId: uuid("bank_account_id").references(() => bankAccountsTable.id, {

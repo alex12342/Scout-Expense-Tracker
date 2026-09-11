@@ -34,6 +34,7 @@ const typeOptions = [
 
 export default function LedgerPage() {
   const [scoutFilter, setScoutFilter] = useState("");
+  const [leaderFilter, setLeaderFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -43,11 +44,17 @@ export default function LedgerPage() {
     queryFn: () => api.listScouts(),
   });
 
+  const { data: leaders } = useQuery({
+    queryKey: ["leaders"],
+    queryFn: () => api.listLeaders(),
+  });
+
   const { data: txs, isLoading } = useQuery({
-    queryKey: ["ledger", scoutFilter, typeFilter, fromDate, toDate],
+    queryKey: ["ledger", scoutFilter, leaderFilter, typeFilter, fromDate, toDate],
     queryFn: () =>
       api.listLedger({
         scoutId: scoutFilter || undefined,
+        leaderId: leaderFilter || undefined,
         type: typeFilter || undefined,
         from: fromDate || undefined,
         to: toDate || undefined,
@@ -62,7 +69,7 @@ export default function LedgerPage() {
       [
         new Date(tx.occurredAt).toISOString().slice(0, 10),
         tx.type,
-        tx.scoutName ?? "",
+        tx.scoutName ?? tx.leaderName ?? "",
         tx.bankAccountName ?? "",
         `"${(tx.description ?? "").replace(/"/g, '""')}"`,
         (tx.amountCents / 100).toFixed(2),
@@ -86,12 +93,18 @@ export default function LedgerPage() {
       />
 
       {/* Filters */}
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Select
           value={scoutFilter}
           onChange={(e) => setScoutFilter(e.target.value)}
           placeholder="All scouts"
-          options={(scouts ?? []).map((s) => ({ value: s.id, label: s.name }))}
+          options={(scouts ?? []).map((s) => ({ value: s.id, label: `${s.firstName} ${s.lastName}` }))}
+        />
+        <Select
+          value={leaderFilter}
+          onChange={(e) => setLeaderFilter(e.target.value)}
+          placeholder="All leaders"
+          options={(leaders ?? []).map((l) => ({ value: l.id, label: `${l.firstName} ${l.lastName}` }))}
         />
         <Select
           value={typeFilter}
@@ -130,7 +143,7 @@ export default function LedgerPage() {
                 <TableRow>
                   <TableHeader>Date</TableHeader>
                   <TableHeader>Type</TableHeader>
-                  <TableHeader>Scout</TableHeader>
+                  <TableHeader>Name</TableHeader>
                   <TableHeader>Account</TableHeader>
                   <TableHeader>Description</TableHeader>
                   <TableHeader className="text-right">Amount</TableHeader>
@@ -155,7 +168,7 @@ export default function LedgerPage() {
                         {tx.type.replace(/_/g, " ")}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-ink">{tx.scoutName ?? "—"}</TableCell>
+                    <TableCell className="text-ink">{tx.scoutName ?? tx.leaderName ?? "—"}</TableCell>
                     <TableCell className="text-muted">{tx.bankAccountName ?? "—"}</TableCell>
                     <TableCell className="text-muted">{tx.description ?? "—"}</TableCell>
                     <TableCell className="text-right font-mono tnum">

@@ -13,7 +13,8 @@ import { getScoutBalance, listLedger } from "../lib/queries";
 const router = Router();
 
 const scoutSchema = z.object({
-  name: z.string().trim().min(1).max(128),
+  firstName: z.string().trim().min(1, "First name is required").max(128),
+  lastName: z.string().trim().max(128).optional().or(z.literal("").transform(() => undefined)),
   bsaNumber: z
     .string()
     .trim()
@@ -21,10 +22,17 @@ const scoutSchema = z.object({
     .optional()
     .or(z.literal("").transform(() => undefined)),
   rank: z.string().trim().max(64).optional().or(z.literal("").transform(() => undefined)),
+  age: z.number().int().min(0).max(120).optional().or(z.literal(0).transform(() => undefined)),
   isActive: z.boolean().default(true),
 });
 
 const updateScoutSchema = scoutSchema.partial();
+
+/** Derive the legacy combined `name` from first + last (kept in the DB for compat). */
+function combinedName(firstName?: string, lastName?: string): string | undefined {
+  if (firstName === undefined) return undefined;
+  return `${firstName} ${lastName ?? ""}`.replace(/\s+/g, " ").trim();
+}
 
 // GET / — all scouts with computed balances.
 router.get("/", requireAuth, async (_req, res) => {
@@ -53,7 +61,10 @@ router.post("/", requireAuth, async (req, res) => {
     }
   }
 
-  const [scout] = await db.insert(scoutsTable).values(parsed.data).returning();
+  const [scout] = await db
+    .insert(scoutsTable)
+    .values({ ...parsed.data, name: combinedName(parsed.data.firstName, parsed.data.lastName) ?? "" })
+    .returning();
   res.status(201).json(scout);
 });
 
@@ -108,9 +119,13 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
   }
 
+  const updates: Record<string, unknown> = { ...parsed.data, updatedAt: new Date() };
+  if (parsed.data.firstName !== undefined || parsed.data.lastName !== undefined) {
+    updates.name = combinedName(parsed.data.firstName, parsed.data.lastName) ?? "";
+  }
   const [scout] = await db
     .update(scoutsTable)
-    .set({ ...parsed.data, updatedAt: new Date() })
+    .set(updates)
     .where(eq(scoutsTable.id, String(req.params.id)))
     .returning();
   if (!scout) {

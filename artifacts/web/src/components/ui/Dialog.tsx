@@ -46,7 +46,8 @@ export function Dialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0 }}
+      className="z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
     >
@@ -58,7 +59,8 @@ export function Dialog({
       <div
         ref={ref}
         className={cn(
-          "relative w-full rounded-xl border border-line bg-surface shadow-lift animate-rise",
+          "relative w-full max-h-[85vh] overflow-y-auto rounded-xl border border-line bg-surface shadow-lift animate-rise",
+          "m-auto",
           sizes[size],
           className,
         )}

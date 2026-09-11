@@ -35,9 +35,11 @@ export default function EventsPage() {
   const [name, setName] = useState("");
   const [eventDate, setEventDate] = useState("");
   const [description, setDescription] = useState("");
-  const [totalCost, setTotalCost] = useState("");
   const [selectedScouts, setSelectedScouts] = useState<string[]>([]);
   const [allocations, setAllocations] = useState<Record<string, string>>({});
+  const [lineItems, setLineItems] = useState<Array<{ name: string; amountCents: number; participantTypes: string[] }>>([
+    { name: "", amountCents: 0, participantTypes: ["everyone"] },
+  ]);
 
   const { data: events, isLoading } = useQuery({
     queryKey: ["events"],
@@ -61,20 +63,20 @@ export default function EventsPage() {
 
   const createMut = useMutation({
     mutationFn: () => {
-      const costNum = parseFloat(totalCost);
-      if (isNaN(costNum) || costNum <= 0) throw new Error("Enter a valid total cost");
+      const validLineItems = lineItems.filter((item) => item.name.trim() && item.amountCents > 0);
+      if (validLineItems.length === 0) throw new Error("Add at least one valid line item");
       const participants = selectedScouts.map((sid) => {
         const allocStr = allocations[sid];
         return {
           scoutId: sid,
-          amountAllocated: allocStr ? parseFloat(allocStr) : undefined,
+          amountAllocatedCents: allocStr ? parseFloat(allocStr) : undefined,
         };
       });
       return api.createEvent({
         name,
         eventDate,
         description: description || undefined,
-        totalCost: costNum,
+        lineItems: validLineItems,
         participants,
       });
     },
@@ -86,9 +88,9 @@ export default function EventsPage() {
       setName("");
       setEventDate("");
       setDescription("");
-      setTotalCost("");
       setSelectedScouts([]);
       setAllocations({});
+      setLineItems([{ name: "", amountCents: 0, participantTypes: ["everyone"] }]);
     },
     onError: (err) => toast(err.message, "error"),
   });
@@ -128,7 +130,8 @@ export default function EventsPage() {
                 <TableRow>
                   <TableHeader>Event</TableHeader>
                   <TableHeader>Date</TableHeader>
-                  <TableHeader className="text-right">Total Cost</TableHeader>
+                  <TableHeader className="text-right">Estimated</TableHeader>
+                  <TableHeader className="text-right">Actual</TableHeader>
                   <TableHeader className="text-right">Participants</TableHeader>
                   <TableHeader className="text-right">Outstanding</TableHeader>
                   <TableHeader>Status</TableHeader>
@@ -145,6 +148,9 @@ export default function EventsPage() {
                     </TableCell>
                     <TableCell className="text-muted">
                       {new Date(ev.eventDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                    </TableCell>
+                    <TableCell className="text-right font-mono tnum">
+                      {formatMoney((ev as { estimatedTotalCents?: number }).estimatedTotalCents ?? ev.totalCostCents)}
                     </TableCell>
                     <TableCell className="text-right font-mono tnum">
                       {formatMoney(ev.totalCostCents)}
@@ -191,8 +197,79 @@ export default function EventsPage() {
             <Input label="Date" type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
           </div>
           <Textarea label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional details…" rows={2} />
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Input label="Total Cost ($)" type="number" step="0.01" min="0" value={totalCost} onChange={(e) => setTotalCost(e.target.value)} placeholder="500.00" prefix="$" />
+
+          {/* Line items */}
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm font-medium text-ink-soft">Cost Items</p>
+              <Button variant="ghost" size="sm" onClick={() => setLineItems([...lineItems, { name: "", amountCents: 0, participantTypes: ["everyone"] }])}>
+                + Add Item
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {lineItems.map((item, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    value={item.name}
+                    onChange={(e) => setLineItems(lineItems.map((it, j) => j === i ? { ...it, name: e.target.value } : it))}
+                    placeholder="Item name"
+                    className="flex-1"
+                  />
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={item.amountCents || ""}
+                    onChange={(e) => setLineItems(lineItems.map((it, j) => j === i ? { ...it, amountCents: parseFloat(e.target.value) || 0 } : it))}
+                    placeholder="0.00"
+                    prefix="$"
+                    className="w-32"
+                  />
+                  <div className="flex gap-1">
+                    <label className="flex items-center gap-1 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={item.participantTypes.includes("scout")}
+                        onChange={(e) => {
+                          const types = e.target.checked
+                            ? [...new Set([...item.participantTypes, "scout"])]
+                            : item.participantTypes.filter((t) => t !== "scout");
+                          setLineItems(lineItems.map((it, j) => j === i ? { ...it, participantTypes: types } : it));
+                        }}
+                        className="h-3 w-3"
+                      />
+                      Scouts
+                    </label>
+                    <label className="flex items-center gap-1 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={item.participantTypes.includes("leader")}
+                        onChange={(e) => {
+                          const types = e.target.checked
+                            ? [...new Set([...item.participantTypes, "leader"])]
+                            : item.participantTypes.filter((t) => t !== "leader");
+                          setLineItems(lineItems.map((it, j) => j === i ? { ...it, participantTypes: types } : it));
+                        }}
+                        className="h-3 w-3"
+                      />
+                      Leaders
+                    </label>
+                  </div>
+                  <button
+                    onClick={() => setLineItems(lineItems.filter((_, j) => j !== i))}
+                    className="text-ember hover:text-ember/80"
+                    disabled={lineItems.length <= 1}
+                  >
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              Total: {formatMoney(lineItems.reduce((s, item) => s + item.amountCents, 0))}
+            </p>
           </div>
 
           {/* Scout picker */}
@@ -204,8 +281,9 @@ export default function EventsPage() {
               <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-line p-2">
                 {scouts.filter((s) => s.isActive).map((s) => {
                   const isSel = selectedScouts.includes(s.id);
-                  const defaultSplit = totalCost && selectedScouts.length > 0
-                    ? formatMoney(Math.round((parseFloat(totalCost) * 100) / selectedScouts.length))
+                  const totalAmount = lineItems.reduce((s, item) => s + item.amountCents, 0);
+                  const defaultSplit = totalAmount && selectedScouts.length > 0
+                    ? formatMoney(Math.round((totalAmount * 100) / selectedScouts.length))
                     : null;
                   return (
                     <div key={s.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-pine-soft/30">
@@ -235,9 +313,9 @@ export default function EventsPage() {
                 })}
               </div>
             )}
-            {selectedScouts.length > 0 && totalCost && (
+            {selectedScouts.length > 0 && lineItems.some((item) => item.amountCents > 0) && (
               <p className="mt-1 text-xs text-muted">
-                Even split: {formatMoney(Math.round((parseFloat(totalCost) * 100) / selectedScouts.length))} each
+                Even split: {formatMoney(Math.round((lineItems.reduce((s, item) => s + item.amountCents, 0) * 100) / selectedScouts.length))} each
                 ({selectedScouts.length} scouts)
               </p>
             )}
@@ -247,7 +325,7 @@ export default function EventsPage() {
           <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
           <Button
             onClick={() => createMut.mutate()}
-            disabled={!name.trim() || !eventDate || !totalCost || selectedScouts.length === 0 || createMut.isPending}
+            disabled={!name.trim() || !eventDate || lineItems.filter((i) => i.amountCents > 0).length === 0 || selectedScouts.length === 0 || createMut.isPending}
           >
             {createMut.isPending ? "Creating…" : "Create Event"}
           </Button>

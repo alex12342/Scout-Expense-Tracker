@@ -18,8 +18,8 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHeader,
   TableHead,
+  TableHeader,
   TableRow,
   useToast,
 } from "../components/ui";
@@ -33,6 +33,8 @@ export default function ScoutDetailPage() {
   const [txAccountId, setTxAccountId] = useState("");
   const [txAmount, setTxAmount] = useState("");
   const [txDesc, setTxDesc] = useState("");
+  const [applyToDues, setApplyToDues] = useState(false);
+  const [depositPreview, setDepositPreview] = useState<string | null>(null);
 
   const { data: scout, isLoading: scoutLoading } = useQuery({
     queryKey: ["scouts", id],
@@ -48,6 +50,21 @@ export default function ScoutDetailPage() {
     queryKey: ["bank-accounts"],
     queryFn: () => api.listAccounts(),
   });
+
+  const { data: duesEntries } = useQuery({
+    queryKey: ["scout", id, "dues"],
+    queryFn: async () => {
+      const allCycles = await api.listDuesCycles();
+      const allEntries = await Promise.all(allCycles.map((c) => api.listDuesEntries(c.id)));
+      const flat = allEntries.flat();
+      return flat.filter((e) => e.memberType === "scout" && e.memberId === id);
+    },
+    enabled: !!id,
+  });
+
+  const totalAssessed = duesEntries?.reduce((s, e) => s + e.amountCents, 0) ?? 0;
+  const totalPaid = duesEntries?.filter((e) => e.isPaid).reduce((s, e) => s + e.amountCents, 0) ?? 0;
+  const totalRemaining = totalAssessed - totalPaid;
 
   const createTxMut = useMutation({
     mutationFn: () => {
@@ -66,11 +83,37 @@ export default function ScoutDetailPage() {
       qc.invalidateQueries({ queryKey: ["scouts"] });
       qc.invalidateQueries({ queryKey: ["scouts", id, "ledger"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["scout", id, "dues"] });
       toast("Transaction recorded", "success");
       setShowAddTx(false);
       setTxAmount("");
       setTxDesc("");
       setTxAccountId("");
+      setApplyToDues(false);
+      setDepositPreview(null);
+    },
+    onError: (err) => toast(err.message, "error"),
+  });
+
+  const applyDepositMut = useMutation({
+    mutationFn: (amountCents: number) =>
+      api.applyDeposit("scout", id!, amountCents, txAccountId || accounts?.[0]?.id || ""),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["scouts"] });
+      qc.invalidateQueries({ queryKey: ["scouts", id, "ledger"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["scout", id, "dues"] });
+      if (data.remaining > 0) {
+        toast(`Applied to dues. Remaining balance: ${formatMoney(data.remaining / 100)}`, "info");
+      } else {
+        toast("Deposit applied to outstanding dues", "success");
+      }
+      setShowAddTx(false);
+      setTxAmount("");
+      setTxDesc("");
+      setTxAccountId("");
+      setApplyToDues(false);
+      setDepositPreview(null);
     },
     onError: (err) => toast(err.message, "error"),
   });
@@ -91,8 +134,8 @@ export default function ScoutDetailPage() {
       </Link>
 
       <PageHeader
-        title={scout?.name ?? "Scout"}
-        description={scout?.rank ? `${scout.rank}${scout.bsaNumber ? ` · BSA #${scout.bsaNumber}` : ""}` : undefined}
+        title={`${scout?.firstName ?? ""} ${scout?.lastName ?? ""}`}
+        description={scout?.rank ? `${scout.rank}${scout?.age ? ` · Age ${scout.age}` : ""}${scout?.bsaNumber ? ` · BSA #${scout.bsaNumber}` : ""}` : undefined}
         actions={<Button onClick={() => setShowAddTx(true)}>Record Transaction</Button>}
       />
 
@@ -109,6 +152,25 @@ export default function ScoutDetailPage() {
           tone={scout?.isActive ? "positive" : "default"}
         />
       </div>
+
+      {/* Dues summary across all cycles */}
+      {scout && duesEntries && duesEntries.length > 0 && (
+        <Card className="mb-6">
+          <CardContent className="pt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-ink">Dues Summary (All Cycles)</h3>
+                <p className="text-xs text-muted">
+                  Assessed: {formatMoney(totalAssessed)} · Paid: {formatMoney(totalPaid)} · Remaining: {formatMoney(totalRemaining)}
+                </p>
+              </div>
+              <Link href="/dues">
+                <Button variant="outline" size="sm">View Dues</Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardContent className="pt-4">
@@ -189,8 +251,24 @@ export default function ScoutDetailPage() {
             value={txAmount}
             onChange={(e) => setTxAmount(e.target.value)}
             placeholder="50.00"
-            prefix="$"
           />
+          {txType === "scout_deposit" && duesEntries && duesEntries.some((e) => !e.isPaid && !e.isWaived) && (
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="applyToDues"
+                checked={applyToDues}
+                onChange={(e) => setApplyToDues(e.target.checked)}
+                className="h-4 w-4"
+              />
+              <label htmlFor="applyToDues" className="text-sm text-ink">
+                Apply to outstanding dues
+              </label>
+            </div>
+          )}
+          {applyToDues && depositPreview && (
+            <p className="text-sm text-muted">{depositPreview}</p>
+          )}
           <Input
             label="Description"
             value={txDesc}
@@ -200,8 +278,22 @@ export default function ScoutDetailPage() {
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setShowAddTx(false)}>Cancel</Button>
-          <Button onClick={() => createTxMut.mutate()} disabled={createTxMut.isPending}>
-            {createTxMut.isPending ? "Recording…" : "Record"}
+          <Button onClick={() => {
+            const cents = parseMoney(txAmount);
+            if (cents === null || cents === 0) {
+              toast("Enter a valid amount", "error");
+              return;
+            }
+            const needsAccount = txType === "scout_deposit" || txType === "reimbursement";
+            const bankId = needsAccount ? (txAccountId || accounts?.[0]?.id) : undefined;
+
+            if (applyToDues && txType === "scout_deposit" && bankId) {
+              applyDepositMut.mutate(Math.abs(cents));
+            } else {
+              createTxMut.mutate();
+            }
+          }} disabled={createTxMut.isPending || applyDepositMut.isPending || !txAmount}>
+            {createTxMut.isPending || applyDepositMut.isPending ? "Recording…" : "Record"}
           </Button>
         </DialogFooter>
       </Dialog>

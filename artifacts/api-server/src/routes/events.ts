@@ -5,19 +5,24 @@ import {
   eventsTable,
   eventParticipantsTable,
   scoutsTable,
+  leadersTable,
   bankAccountsTable,
   transactionsTable,
+  eventLineItemsTable,
+  eventCostChangesTable,
 } from "@scout-expense-tracker/db";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { evenSplitCents, parseMoneyToCents } from "../lib/money";
+import { EVENT_LINE_ITEM_PARTICIPANT_TYPES } from "@scout-expense-tracker/db";
 
 const router = Router();
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 interface ParticipantIn {
-  scoutId: string;
+  scoutId?: string;
+  leaderId?: string;
   amountAllocatedCents?: number; // optional override
 }
 
@@ -36,7 +41,7 @@ router.get("/", requireAuth, async (_req, res) => {
     .orderBy(desc(eventsTable.eventDate));
 
   const eventIds = events.map((e) => e.id);
-  const [agg, participants] =
+  const [agg, participants, lineItems] =
     eventIds.length > 0
       ? await Promise.all([
           db
@@ -53,17 +58,27 @@ router.get("/", requireAuth, async (_req, res) => {
             .select({
               eventId: eventParticipantsTable.eventId,
               scoutId: eventParticipantsTable.scoutId,
+              leaderId: eventParticipantsTable.leaderId,
             })
             .from(eventParticipantsTable)
             .where(inArray(eventParticipantsTable.eventId, eventIds)),
+          db
+            .select({
+              eventId: eventLineItemsTable.eventId,
+              total: sql<number>`coalesce(sum(${eventLineItemsTable.amountCents}),0)`,
+            })
+            .from(eventLineItemsTable)
+            .where(inArray(eventLineItemsTable.eventId, eventIds))
+            .groupBy(eventLineItemsTable.eventId),
         ])
-      : [[], []];
+      : [[], [], []];
 
   const aggMap = new Map(agg.map((a) => [a.eventId, a]));
-  const partMap = new Map<string, { scoutId: string }[]>();
+  const partMap = new Map<string, { scoutId: string | null; leaderId: string | null }[]>();
+  const lineItemMap = new Map(lineItems.map((li) => [li.eventId, li.total]));
   for (const p of participants) {
     const list = partMap.get(p.eventId) ?? [];
-    list.push({ scoutId: p.scoutId });
+    list.push({ scoutId: p.scoutId, leaderId: p.leaderId });
     partMap.set(p.eventId, list);
   }
 
@@ -78,7 +93,7 @@ router.get("/", requireAuth, async (_req, res) => {
         totalPaidCents: paid,
         outstandingCents: allocated - paid,
         participantCount: Number(a?.n ?? 0),
-        isPaid: allocated > 0 && paid >= allocated,
+        estimatedTotalCents: Number(lineItemMap.get(e.id) ?? 0),
       };
     }),
   );
@@ -87,23 +102,24 @@ router.get("/", requireAuth, async (_req, res) => {
 // ── POST / — create event + participants + allocation transactions ──────────
 
 const participantSchema = z.object({
-  scoutId: z.string().uuid(),
-  amountAllocated: z
-    .union([z.string(), z.number()])
-    .optional()
-    .transform((v) => {
-      if (v === undefined || v === "") return undefined;
-      const cents = parseMoneyToCents(v);
-      if (cents === null || cents < 0) throw new Error("Invalid allocation");
-      return cents;
-    }),
+  scoutId: z.string().uuid().optional(),
+  leaderId: z.string().uuid().optional(),
+  amountAllocatedCents: z.number().int().min(0).optional(),
+}).refine((v) => (v.scoutId ? 1 : 0) + (v.leaderId ? 1 : 0) === 1, {
+  message: "Exactly one of scoutId or leaderId is required",
+});
+
+const lineItemSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  amountCents: z.number().int().min(0),
+  participantTypes: z.enum(EVENT_LINE_ITEM_PARTICIPANT_TYPES).array().optional(),
 });
 
 const createEventSchema = z.object({
   name: z.string().trim().min(1).max(160),
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD"),
   description: z.string().trim().max(2000).optional(),
-  totalCost: z.union([z.string(), z.number()]),
+  lineItems: z.array(lineItemSchema).min(1, "At least one line item is required"),
   participants: z.array(participantSchema).min(1, "At least one participant"),
 });
 
@@ -113,67 +129,90 @@ router.post("/", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid event", issues: parsed.error.flatten() });
     return;
   }
-  const { name, eventDate, description, participants } = parsed.data;
-  const totalCostCents = parseMoneyToCents(parsed.data.totalCost);
-  if (totalCostCents === null || totalCostCents <= 0) {
-    res.status(400).json({ error: "Total cost must be a positive dollar amount" });
-    return;
-  }
+  const { name, eventDate, description, lineItems, participants } = parsed.data;
 
-  // Dedupe participants by scoutId.
+  // Dedupe participants by their ID (scout or leader).
   const seen = new Set<string>();
-  const clean: { scoutId: string; explicit?: number }[] = [];
+  const clean: ParticipantIn[] = [];
   for (const p of participants) {
-    if (seen.has(p.scoutId)) continue;
-    seen.add(p.scoutId);
-    clean.push({ scoutId: p.scoutId, explicit: p.amountAllocated });
+    const key = p.scoutId ?? p.leaderId ?? "";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push(p);
   }
 
-  // Validate all scouts exist.
-  const scoutIds = clean.map((p) => p.scoutId);
-  const found = await db
-    .select({ id: scoutsTable.id })
-    .from(scoutsTable)
-    .where(inArray(scoutsTable.id, scoutIds));
-  if (found.length !== scoutIds.length) {
-    res.status(400).json({ error: "One or more participants do not exist" });
-    return;
-  }
-
-  // Resolve allocations: explicit overrides, or even split of total.
-  const explicitSum = clean.reduce(
-    (s, p) => s + (p.explicit ?? 0),
-    0,
-  );
-  const hasExplicit = clean.some((p) => p.explicit !== undefined);
-
-  let allocations: Record<string, number>;
-  if (hasExplicit) {
-    allocations = {};
-    for (const p of clean) {
-      if (p.explicit === undefined) {
-        res.status(400).json({
-          error: "Either set every participant's allocation or none (auto-split)",
-        });
-        return;
-      }
-      allocations[p.scoutId] = p.explicit;
-    }
-    if (explicitSum !== totalCostCents) {
-      res.status(400).json({
-        error:
-          `Allocations must total exactly the event cost ` +
-          `(currently off by ${Math.abs(explicitSum - totalCostCents) / 100} dollars)`,
-      });
+  // Validate all participants exist.
+  const scoutIds = clean.map((p) => p.scoutId).filter(Boolean) as string[];
+  const leaderIds = clean.map((p) => p.leaderId).filter(Boolean) as string[];
+  if (scoutIds.length) {
+    const found = await db
+      .select({ id: scoutsTable.id })
+      .from(scoutsTable)
+      .where(inArray(scoutsTable.id, scoutIds));
+    if (found.length !== scoutIds.length) {
+      res.status(400).json({ error: "One or more participants do not exist" });
       return;
     }
-  } else {
-    const parts = evenSplitCents(totalCostCents, clean.length);
-    allocations = {};
-    clean.forEach((p, i) => (allocations[p.scoutId] = parts[i]));
+  }
+  if (leaderIds.length) {
+    const found = await db
+      .select({ id: leadersTable.id })
+      .from(leadersTable)
+      .where(inArray(leadersTable.id, leaderIds));
+    if (found.length !== leaderIds.length) {
+      res.status(400).json({ error: "One or more participants do not exist" });
+      return;
+    }
   }
 
-  // Write event + participants + allocation transactions atomically.
+  // Calculate estimated total from line items.
+  const estimatedTotalCents = lineItems.reduce((s, item) => s + item.amountCents, 0);
+
+  // Calculate per-participant estimated allocations respecting participantTypes and overrides.
+  const scoutParticipants = clean.filter((p) => p.scoutId);
+  const leaderParticipants = clean.filter((p) => p.leaderId);
+
+  // For each line item, determine which participants are responsible.
+  const lineItemLoads: Array<{
+    amountCents: number;
+    participants: ParticipantIn[];
+  }> = lineItems.map((item) => {
+    const types = item.participantTypes ?? ["everyone"];
+    const applicable = clean.filter((p) => {
+      if (types.includes("everyone")) return true;
+      if (p.scoutId && types.includes("scout")) return true;
+      if (p.leaderId && types.includes("leader")) return true;
+      return false;
+    });
+    return { amountCents: item.amountCents, participants: applicable };
+  });
+
+  // Split each line item across applicable participants.
+  const participantEstimated: Record<string, number> = {};
+  for (const p of clean) {
+    participantEstimated[p.scoutId ?? p.leaderId ?? ""] = 0;
+  }
+
+  for (const load of lineItemLoads) {
+    if (load.participants.length === 0) continue;
+    const hasExplicit = load.participants.some((p) => p.amountAllocatedCents !== undefined);
+    if (hasExplicit) {
+      // Use explicit overrides.
+      for (const p of load.participants) {
+        const key = p.scoutId ?? p.leaderId ?? "";
+        participantEstimated[key] += p.amountAllocatedCents ?? 0;
+      }
+    } else {
+      // Even split among applicable participants.
+      const parts = evenSplitCents(load.amountCents, load.participants.length);
+      load.participants.forEach((p, i) => {
+        const key = p.scoutId ?? p.leaderId ?? "";
+        participantEstimated[key] += parts[i];
+      });
+    }
+  }
+
+  // Write event + line items + participants + allocation transactions atomically.
   const result = await db.transaction(async (tx) => {
     const [event] = await tx
       .insert(eventsTable)
@@ -181,10 +220,21 @@ router.post("/", requireAuth, async (req, res) => {
         name,
         eventDate,
         description: description ?? null,
-        totalCostCents,
+        totalCostCents: 0, // Will be updated via line items.
         createdBy: req.userId,
+        fields: [],
       })
       .returning();
+
+    // Insert line items.
+    await tx.insert(eventLineItemsTable).values(
+      lineItems.map((item) => ({
+        eventId: event.id,
+        name: item.name,
+        amountCents: item.amountCents,
+        participantTypes: item.participantTypes ?? ["everyone"],
+      })),
+    );
 
     const insertedParts = (
       await Promise.all(
@@ -193,8 +243,10 @@ router.post("/", requireAuth, async (req, res) => {
             .insert(eventParticipantsTable)
             .values({
               eventId: event.id,
-              scoutId: p.scoutId,
-              amountAllocatedCents: allocations[p.scoutId],
+              scoutId: p.scoutId ?? null,
+              leaderId: p.leaderId ?? null,
+              amountAllocatedCents: participantEstimated[p.scoutId ?? p.leaderId ?? ""] ?? 0,
+              estimatedAllocatedCents: participantEstimated[p.scoutId ?? p.leaderId ?? ""] ?? 0,
               amountPaidCents: 0,
             })
             .returning(),
@@ -203,16 +255,20 @@ router.post("/", requireAuth, async (req, res) => {
     ).flat();
 
     await tx.insert(transactionsTable).values(
-      insertedParts.map((part) => ({
-        occurredAt: new Date(),
-        type: "event_allocation" as const,
-        amountCents: -allocations[part.scoutId],
-        scoutId: part.scoutId,
-        eventId: event.id,
-        eventParticipantId: part.id,
-        description: `Allocated share — ${name}`,
-        createdBy: req.userId,
-      })),
+      insertedParts.map((part) => {
+        const key = part.scoutId ?? part.leaderId ?? "";
+        return {
+          occurredAt: new Date(),
+          type: "event_allocation" as const,
+          amountCents: -(participantEstimated[key] ?? 0),
+          scoutId: part.scoutId,
+          leaderId: part.leaderId,
+          eventId: event.id,
+          eventParticipantId: part.id,
+          description: `Estimated share — ${name}`,
+          createdBy: req.userId,
+        };
+      }),
     );
 
     return { event, participants: insertedParts };
@@ -234,24 +290,53 @@ async function loadEvent(id: string) {
     .select({
       part: eventParticipantsTable,
       scoutName: scoutsTable.name,
+      leaderName: leadersTable.name,
     })
     .from(eventParticipantsTable)
     .leftJoin(
       scoutsTable,
       eq(eventParticipantsTable.scoutId, scoutsTable.id),
     )
+    .leftJoin(
+      leadersTable,
+      eq(eventParticipantsTable.leaderId, leadersTable.id),
+    )
     .where(eq(eventParticipantsTable.eventId, id))
-    .orderBy(scoutsTable.name);
+    .orderBy((t) => {
+      // Put scouts first, then leaders (name sort within each group).
+      return t.leaderName;
+    });
+
+  const lineItems = await db
+    .select()
+    .from(eventLineItemsTable)
+    .where(eq(eventLineItemsTable.eventId, id));
+
+  const costChanges = await db
+    .select()
+    .from(eventCostChangesTable)
+    .where(eq(eventCostChangesTable.eventId, id))
+    .orderBy(desc(eventCostChangesTable.createdAt));
+
+  const estimatedTotal = participants.reduce(
+    (s, p) => s + p.part.estimatedAllocatedCents,
+    0,
+  );
 
   return {
     ...event,
+    lineItems,
+    costChanges,
+    estimatedTotalCents: estimatedTotal,
     participants: participants.map((p) => ({
       ...p.part,
       scoutName: p.scoutName,
+      leaderName: p.leaderName,
+      estimatedOutstandingCents: p.part.estimatedAllocatedCents - p.part.amountPaidCents,
       outstandingCents: p.part.amountAllocatedCents - p.part.amountPaidCents,
       status: paymentStatus(
         p.part.amountPaidCents,
-        p.part.amountAllocatedCents,
+        p.part.estimatedAllocatedCents,
       ),
     })),
   };
@@ -299,6 +384,10 @@ const updateEventSchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   description: z.string().trim().max(2000).nullable().optional(),
+  fields: z
+    .array(z.object({ key: z.string(), value: z.string() }))
+    .nullable()
+    .optional(),
 });
 
 router.patch("/:id", requireAuth, async (req, res) => {
@@ -319,10 +408,149 @@ router.patch("/:id", requireAuth, async (req, res) => {
   res.json(await loadEvent(event.id));
 });
 
+// ── PATCH /:id/update-costs — update line items and recalculate allocations ─
+
+const updateCostsSchema = z.object({
+  lineItems: z.array(lineItemSchema).min(1, "At least one line item is required"),
+});
+
+router.patch("/:id/update-costs", requireAuth, async (req, res) => {
+  const parsed = updateCostsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid cost update", issues: parsed.error.flatten() });
+    return;
+  }
+  const { lineItems } = parsed.data;
+
+  const event = await loadEvent(String(req.params.id));
+  if (!event) {
+    res.status(404).json({ error: "Event not found" });
+    return;
+  }
+
+  const estimatedTotalCents = lineItems.reduce((s, item) => s + item.amountCents, 0);
+
+  // Calculate new per-participant allocations.
+  const clean = event.participants.map((p) => {
+    const participantSchema = z.object({
+      scoutId: z.string().uuid().optional(),
+      leaderId: z.string().uuid().optional(),
+      amountAllocatedCents: z.number().int().min(0).optional(),
+    });
+    const participantData = participantSchema.parse({
+      scoutId: p.scoutId ?? undefined,
+      leaderId: p.leaderId ?? undefined,
+    });
+    return participantData;
+  });
+
+  const scoutParticipants = clean.filter((p) => p.scoutId);
+  const leaderParticipants = clean.filter((p) => p.leaderId);
+
+  const lineItemLoads: Array<{
+    amountCents: number;
+    participants: typeof clean;
+  }> = lineItems.map((item) => {
+    const types = item.participantTypes ?? ["everyone"];
+    const applicable = clean.filter((p) => {
+      if (types.includes("everyone")) return true;
+      if (p.scoutId && types.includes("scout")) return true;
+      if (p.leaderId && types.includes("leader")) return true;
+      return false;
+    });
+    return { amountCents: item.amountCents, participants: applicable };
+  });
+
+  const participantEstimated: Record<string, number> = {};
+  for (const p of clean) {
+    participantEstimated[p.scoutId ?? p.leaderId ?? ""] = 0;
+  }
+
+  for (const load of lineItemLoads) {
+    if (load.participants.length === 0) continue;
+    const hasExplicit = load.participants.some((p) => p.amountAllocatedCents !== undefined);
+    if (hasExplicit) {
+      for (const p of load.participants) {
+        const key = p.scoutId ?? p.leaderId ?? "";
+        participantEstimated[key] += p.amountAllocatedCents ?? 0;
+      }
+    } else {
+      const parts = evenSplitCents(load.amountCents, load.participants.length);
+      load.participants.forEach((p, i) => {
+        const key = p.scoutId ?? p.leaderId ?? "";
+        participantEstimated[key] += parts[i];
+      });
+    }
+  }
+
+  // Log cost changes.
+  await db.transaction(async (tx) => {
+    // Update line items.
+    await tx
+      .delete(eventLineItemsTable)
+      .where(eq(eventLineItemsTable.eventId, event.id));
+
+    await tx.insert(eventLineItemsTable).values(
+      lineItems.map((item) => ({
+        eventId: event.id,
+        name: item.name,
+        amountCents: item.amountCents,
+        participantTypes: item.participantTypes ?? ["everyone"],
+      })),
+    );
+
+    // Update participant allocations and create adjustment transactions.
+    for (const participant of event.participants) {
+      const key = participant.scoutId ?? participant.leaderId ?? "";
+      const newEstimated = participantEstimated[key] ?? 0;
+      const oldEstimated = participant.estimatedAllocatedCents;
+      const diff = newEstimated - oldEstimated;
+
+      if (diff !== 0) {
+        await tx
+          .update(eventParticipantsTable)
+          .set({ estimatedAllocatedCents: newEstimated })
+          .where(eq(eventParticipantsTable.id, participant.id));
+
+        await tx.insert(transactionsTable).values({
+          occurredAt: new Date(),
+          type: "event_allocation" as const,
+          amountCents: -diff,
+          scoutId: participant.scoutId,
+          leaderId: participant.leaderId,
+          eventId: event.id,
+          eventParticipantId: participant.id,
+          description: `Cost adjustment — ${event.name}`,
+          createdBy: req.userId,
+        });
+      } else {
+        await tx
+          .update(eventParticipantsTable)
+          .set({ estimatedAllocatedCents: newEstimated })
+          .where(eq(eventParticipantsTable.id, participant.id));
+      }
+    }
+
+    // Log the update.
+    await tx.insert(eventCostChangesTable).values({
+      eventId: event.id,
+      action: "update_total",
+      oldAmountCents: event.totalCostCents,
+      newAmountCents: estimatedTotalCents,
+      userId: req.userId,
+      note: "Updated event costs",
+      createdAt: new Date(),
+    });
+  });
+
+  res.json(await loadEvent(event.id));
+});
+
 // ── POST /:id/payments — record a participant payment ───────────────────────
 
 const paymentSchema = z.object({
-  scoutId: z.string().uuid(),
+  scoutId: z.string().uuid().optional(),
+  leaderId: z.string().uuid().optional(),
   amount: z.union([z.string(), z.number()]),
   bankAccountId: z.string().uuid().optional(),
   description: z.string().trim().max(512).optional(),
@@ -335,7 +563,7 @@ router.post("/:id/payments", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid payment", issues: parsed.error.flatten() });
     return;
   }
-  const { scoutId, bankAccountId, description, occurredAt } = parsed.data;
+  const { scoutId, leaderId, bankAccountId, description, occurredAt } = parsed.data;
   const amountCents = parseMoneyToCents(parsed.data.amount);
   if (amountCents === null || amountCents <= 0) {
     res.status(400).json({ error: "Payment amount must be positive" });
@@ -347,9 +575,11 @@ router.post("/:id/payments", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Event not found" });
     return;
   }
-  const participant = event.participants.find((p) => p.scoutId === scoutId);
+  const participant = event.participants.find(
+    (p) => p.scoutId === scoutId || p.leaderId === leaderId,
+  );
   if (!participant) {
-    res.status(400).json({ error: "Scout is not a participant in this event" });
+    res.status(400).json({ error: "Participant not found in this event" });
     return;
   }
   const outstanding = participant.amountAllocatedCents - participant.amountPaidCents;
@@ -381,7 +611,8 @@ router.post("/:id/payments", requireAuth, async (req, res) => {
       .where(
         and(
           eq(eventParticipantsTable.eventId, event.id),
-          eq(eventParticipantsTable.scoutId, scoutId),
+          ...(scoutId ? [eq(eventParticipantsTable.scoutId, scoutId)] : []),
+          ...(leaderId ? [eq(eventParticipantsTable.leaderId, leaderId)] : []),
         ),
       );
 
@@ -391,7 +622,8 @@ router.post("/:id/payments", requireAuth, async (req, res) => {
         occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
         type: "event_payment",
         amountCents,
-        scoutId,
+        scoutId: scoutId ?? null,
+        leaderId: leaderId ?? null,
         bankAccountId: bankAccountId ?? null,
         eventId: event.id,
         eventParticipantId: participant.id,
@@ -414,7 +646,7 @@ router.post("/:id/refunds", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid refund", issues: parsed.error.flatten() });
     return;
   }
-  const { scoutId, bankAccountId, description, occurredAt } = parsed.data;
+  const { scoutId, leaderId, bankAccountId, description, occurredAt } = parsed.data;
   const amountCents = parseMoneyToCents(parsed.data.amount);
   if (amountCents === null || amountCents <= 0) {
     res.status(400).json({ error: "Refund amount must be positive" });
@@ -426,9 +658,11 @@ router.post("/:id/refunds", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Event not found" });
     return;
   }
-  const participant = event.participants.find((p) => p.scoutId === scoutId);
+  const participant = event.participants.find(
+    (p) => p.scoutId === scoutId || p.leaderId === leaderId,
+  );
   if (!participant) {
-    res.status(400).json({ error: "Scout is not a participant in this event" });
+    res.status(400).json({ error: "Participant not found in this event" });
     return;
   }
   if (participant.amountPaidCents < amountCents) {
@@ -457,7 +691,8 @@ router.post("/:id/refunds", requireAuth, async (req, res) => {
       .where(
         and(
           eq(eventParticipantsTable.eventId, event.id),
-          eq(eventParticipantsTable.scoutId, scoutId),
+          ...(scoutId ? [eq(eventParticipantsTable.scoutId, scoutId)] : []),
+          ...(leaderId ? [eq(eventParticipantsTable.leaderId, leaderId)] : []),
         ),
       );
 
@@ -467,7 +702,8 @@ router.post("/:id/refunds", requireAuth, async (req, res) => {
         occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
         type: "event_refund",
         amountCents: -amountCents,
-        scoutId,
+        scoutId: scoutId ?? null,
+        leaderId: leaderId ?? null,
         bankAccountId: bankAccountId ?? null,
         eventId: event.id,
         eventParticipantId: participant.id,

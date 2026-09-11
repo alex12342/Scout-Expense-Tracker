@@ -7,11 +7,15 @@ import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import ScoutsPage from "./pages/ScoutsPage";
 import ScoutDetailPage from "./pages/ScoutDetailPage";
+import LeadersPage from "./pages/LeadersPage";
+import LeaderDetailPage from "./pages/LeaderDetailPage";
+import DuesPage from "./pages/DuesPage";
 import BankAccountsPage from "./pages/BankAccountsPage";
 import BankAccountDetailPage from "./pages/BankAccountDetailPage";
 import EventsPage from "./pages/EventsPage";
 import EventDetailPage from "./pages/EventDetailPage";
 import LedgerPage from "./pages/LedgerPage";
+import ReportsPage from "./pages/ReportsPage";
 import SettingsPage from "./pages/SettingsPage";
 
 function FullScreenSpinner() {
@@ -67,6 +71,15 @@ export default function App() {
             <Route path="/scouts/:id">
               <ScoutDetailPage />
             </Route>
+            <Route path="/leaders">
+              <LeadersPage />
+            </Route>
+            <Route path="/leaders/:id">
+              <LeaderDetailPage />
+            </Route>
+            <Route path="/dues">
+              <DuesPage />
+            </Route>
             <Route path="/bank-accounts">
               <BankAccountsPage />
             </Route>
@@ -81,6 +94,9 @@ export default function App() {
             </Route>
             <Route path="/ledger">
               <LedgerPage />
+            </Route>
+            <Route path="/reports">
+              <ReportsPage />
             </Route>
             <Route path="/settings">
               <SettingsPage />

@@ -58,6 +58,12 @@ export default function DashboardPage() {
           sub={`${data.scouts.filter((s) => (s.balanceCents ?? 0) < 0).length} scouts owing`}
         />
         <StatCard
+          label="Leaders Owed"
+          value={formatMoney(-totals.leaderDebtCents)}
+          tone={(totals.leaderDebtCents ?? 0) > 0 ? "negative" : "default"}
+          sub={`${(data.leaders ?? []).filter((l) => (l.balanceCents ?? 0) < 0).length} leaders owing`}
+        />
+        <StatCard
           label="Scouts Credit"
           value={formatMoney(totals.scoutCreditCents)}
           tone={totals.scoutCreditCents > 0 ? "positive" : "default"}
@@ -68,6 +74,12 @@ export default function DashboardPage() {
           value={formatMoney(totals.eventsOutstandingCents)}
           tone={totals.eventsOutstandingCents > 0 ? "warning" : "default"}
           sub="Unpaid event splits"
+        />
+        <StatCard
+          label="Total Owed"
+          value={formatMoney(totals.totalOwedToTroopCents)}
+          tone={totals.totalOwedToTroopCents > 0 ? "negative" : "default"}
+          sub="Scouts + leaders + events + dues"
         />
       </div>
 
@@ -193,6 +205,78 @@ export default function DashboardPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Leaders with balances */}
+      {(data.leaders?.length ?? 0) > 0 && (
+        <Card className="mt-6">
+          <CardContent className="pt-5">
+            <h2 className="mb-3 font-display text-sm font-semibold text-ink">Leader Balances</h2>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeader>Name</TableHeader>
+                  <TableHeader>Position</TableHeader>
+                  <TableHeader className="text-right">Balance</TableHeader>
+                  <TableHeader className="text-right">Status</TableHeader>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {data.leaders!.map((leader) => (
+                  <TableRow key={leader.id}>
+                    <TableCell>
+                      <Link href={`/leaders/${leader.id}`} className="font-medium text-ink hover:text-pine">
+                        {leader.firstName} {leader.lastName}
+                      </Link>
+                    </TableCell>
+                    <TableCell className="text-muted">{leader.position ?? "—"}</TableCell>
+                    <TableCell className="text-right font-mono tnum">
+                      {formatMoney(leader.balanceCents ?? 0)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {(leader.balanceCents ?? 0) < 0 ? (
+                        <Badge variant="destructive">Owes</Badge>
+                      ) : (leader.balanceCents ?? 0) > 0 ? (
+                        <Badge variant="success">Credit</Badge>
+                      ) : (
+                        <Badge variant="muted">Even</Badge>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Dues Summary */}
+      {(data.dues.assessedCents ?? 0) > 0 && (
+        <Card className="mt-6">
+          <CardContent className="pt-5">
+            <h2 className="mb-3 font-display text-sm font-semibold text-ink">Dues Summary (All Cycles)</h2>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <p className="text-xs text-muted">Assessed</p>
+                <p className="font-mono text-lg font-medium tnum text-ink">
+                  {formatMoney(data.dues.assessedCents)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted">Paid</p>
+                <p className="font-mono text-lg font-medium tnum text-moss">
+                  {formatMoney(data.dues.paidCents)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted">Outstanding</p>
+                <p className="font-mono text-lg font-medium tnum text-ember">
+                  {formatMoney(data.dues.outstandingCents)}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

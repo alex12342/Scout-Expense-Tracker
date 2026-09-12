@@ -213,10 +213,10 @@ export default function DuesPage() {
     setShowEditCycle(true);
   };
 
-  const summaryRows = summaryData?.summary ?? [];
-  const totalAssessed = summaryRows.reduce((s: number, c: any) => s + (c.totalAmountCents ?? 0), 0);
-  const totalPaid = summaryRows.reduce((s: number, c: any) => s + (c.paidAmountCents ?? 0), 0);
-  const totalWaived = summaryRows.reduce((s: number, c: any) => s + (c.waivedAmountCents ?? 0), 0);
+  const summaryRow = summaryData?.summary ?? null;
+  const totalAssessed = summaryRow?.totalAmountCents ?? 0;
+  const totalPaid = summaryRow?.paidAmountCents ?? 0;
+  const totalWaived = summaryRow?.waivedAmountCents ?? 0;
   const totalOutstanding = totalAssessed - totalPaid - totalWaived;
 
   const toggleSelect = (id: string) => {

@@ -25,6 +25,7 @@ export interface Scout {
   duesBreakdown?: {
     assessedCents: number;
     paidCents: number;
+    remainingCents: number;
   };
 }
 
@@ -41,6 +42,7 @@ export interface Leader {
   duesBreakdown?: {
     assessedCents: number;
     paidCents: number;
+    remainingCents: number;
   };
 }
 

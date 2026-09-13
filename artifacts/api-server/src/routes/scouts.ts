@@ -5,6 +5,7 @@ import {
   scoutsTable,
   transactionsTable,
   eventParticipantsTable,
+  duesTable,
 } from "@scout-expense-tracker/db";
 import { eq, count, sql, and } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
@@ -81,18 +82,13 @@ router.get("/:id", requireAuth, async (req, res) => {
   }
   const balanceCents = await getScoutBalance(scout.id);
 
-  // Dues breakdown from ledger transactions.
+  // Dues breakdown — dues table is the source of truth for what's owed.
   const [assessedRow] = await db
     .select({
-      total: sql<number>`coalesce(sum(amount_cents), 0)`,
+      total: sql<number>`coalesce(sum(${duesTable.amountCents}), 0)`,
     })
-    .from(transactionsTable)
-    .where(
-      and(
-        eq(transactionsTable.type, "dues_assessed"),
-        eq(transactionsTable.scoutId, scout.id),
-      ),
-    );
+    .from(duesTable)
+    .where(eq(duesTable.memberId, scout.id));
 
   const [paidRow] = await db
     .select({
@@ -106,14 +102,16 @@ router.get("/:id", requireAuth, async (req, res) => {
       ),
     );
 
-  const assessedCents = Math.abs(Number(assessedRow?.total ?? 0));
+  const assessedCents = Number(assessedRow?.total ?? 0);
   const paidCents = Number(paidRow?.total ?? 0);
+  const remainingCents = Math.max(0, assessedCents - paidCents);
   res.json({
     ...scout,
     balanceCents,
     duesBreakdown: {
       assessedCents,
       paidCents,
+      remainingCents,
     },
   });
 });

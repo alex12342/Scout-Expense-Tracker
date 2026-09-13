@@ -199,7 +199,9 @@ export default function DuesPage() {
       setShowRecordPayment(false);
       setPaymentAmount("");
       setEditingEntry(null);
+      toast("Payment recorded", "success");
     },
+    onError: (err) => toast(err.message, "error"),
   });
 
   const handleGenerate = (cycleId: string) => {

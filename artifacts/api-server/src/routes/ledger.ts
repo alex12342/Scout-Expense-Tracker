@@ -4,6 +4,7 @@ import {
   db,
   transactionsTable,
   scoutsTable,
+  leadersTable,
   bankAccountsTable,
   TRANSACTION_TYPES,
 } from "@scout-expense-tracker/db";
@@ -33,6 +34,7 @@ const createTransactionSchema = z
     // Entered in dollars, positive or negative (e.g. "50", "-12.5").
     amount: z.union([z.string(), z.number()]),
     scoutId: z.string().uuid().optional(),
+    leaderId: z.string().uuid().optional(),
     bankAccountId: z.string().uuid().optional(),
     description: z.string().trim().max(512).optional(),
     occurredAt: z.string().datetime({ offset: true }).optional(),
@@ -48,21 +50,22 @@ const createTransactionSchema = z
 function assertValidForType(
   type: (typeof MANUAL_TYPES)[number],
   scoutId: string | undefined,
+  leaderId: string | undefined,
   bankAccountId: string | undefined,
 ): string | null {
   switch (type) {
     case "scout_deposit":
     case "reimbursement":
     case "scout_adjustment":
-      if (!scoutId) return "A scout is required for this transaction type";
+      if (!scoutId && !leaderId) return "A scout or leader is required for this transaction type";
       break;
     case "bank_expense":
     case "bank_adjustment":
       if (!bankAccountId) return "A bank account is required for this transaction type";
       break;
     case "opening_balance":
-      if (!scoutId && !bankAccountId)
-        return "Opening balance requires a scout or a bank account";
+      if (!scoutId && !leaderId && !bankAccountId)
+        return "Opening balance requires a scout, a leader, or a bank account";
       break;
   }
   return null;
@@ -124,10 +127,10 @@ router.post("/", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid transaction" });
     return;
   }
-  const { type, cents, scoutId, bankAccountId, description, occurredAt } =
+  const { type, cents, scoutId, leaderId, bankAccountId, description, occurredAt } =
     parsed.data;
 
-  const typeError = assertValidForType(type, scoutId, bankAccountId);
+  const typeError = assertValidForType(type, scoutId, leaderId, bankAccountId);
   if (typeError) {
     res.status(400).json({ error: typeError });
     return;
@@ -142,6 +145,17 @@ router.post("/", requireAuth, async (req, res) => {
       .limit(1);
     if (!scout) {
       res.status(400).json({ error: "Unknown scout" });
+      return;
+    }
+  }
+  if (leaderId) {
+    const [leader] = await db
+      .select({ id: leadersTable.id })
+      .from(leadersTable)
+      .where(eq(leadersTable.id, leaderId))
+      .limit(1);
+    if (!leader) {
+      res.status(400).json({ error: "Unknown leader" });
       return;
     }
   }
@@ -173,6 +187,7 @@ router.post("/", requireAuth, async (req, res) => {
       type,
       amountCents,
       scoutId: scoutId ?? null,
+      leaderId: leaderId ?? null,
       bankAccountId: bankAccountId ?? null,
       description: description ?? null,
       createdBy: req.userId,

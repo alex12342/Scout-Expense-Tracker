@@ -81,7 +81,7 @@ export default function LeaderDetailPage() {
 
   const totalAssessed = leader?.duesBreakdown?.assessedCents ?? 0;
   const totalPaid = leader?.duesBreakdown?.paidCents ?? 0;
-  const totalRemaining = totalAssessed - totalPaid;
+  const totalRemaining = leader?.duesBreakdown?.remainingCents ?? Math.max(0, totalAssessed - totalPaid);
 
   const updateMut = useMutation({
     mutationFn: () =>

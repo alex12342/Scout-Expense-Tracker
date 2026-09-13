@@ -65,7 +65,7 @@ export default function ScoutDetailPage() {
 
   const totalAssessed = scout?.duesBreakdown?.assessedCents ?? 0;
   const totalPaid = scout?.duesBreakdown?.paidCents ?? 0;
-  const totalRemaining = totalAssessed - totalPaid;
+  const totalRemaining = scout?.duesBreakdown?.remainingCents ?? Math.max(0, totalAssessed - totalPaid);
 
   const openEdit = () => {
     if (!scout) return;

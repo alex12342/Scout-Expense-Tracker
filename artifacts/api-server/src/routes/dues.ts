@@ -516,15 +516,17 @@ router.post("/apply-deposit", requireAuth, async (req, res) => {
       .where(eq(duesTable.id, a.duesId));
   }
 
-  // Create scout_deposit transaction for the full deposit amount.
-  await db.insert(transactionsTable).values({
-    type: "scout_deposit",
-    scoutId: body.data.memberType === "scout" ? body.data.memberId : null,
-    leaderId: body.data.memberType === "leader" ? body.data.memberId : null,
-    bankAccountId: body.data.bankAccountId,
-    amountCents: body.data.amountCents,
-    description: "Deposit",
-  });
+  // Create scout_deposit transaction only for remaining balance after applying to dues.
+  if (balance > 0) {
+    await db.insert(transactionsTable).values({
+      type: "scout_deposit",
+      scoutId: body.data.memberType === "scout" ? body.data.memberId : null,
+      leaderId: body.data.memberType === "leader" ? body.data.memberId : null,
+      bankAccountId: body.data.bankAccountId,
+      amountCents: balance,
+      description: "Deposit",
+    });
+  }
 
   res.json({
     applied: applied.map((a) => ({ duesId: a.duesId, amountCents: a.amountCents })),
@@ -926,7 +928,7 @@ router.get("/cycles/:cycleId/breakdown", requireAuth, async (req, res) => {
       }
 
       return {
-        duesId: entry.id,
+        id: entry.id,
         memberType: entry.memberType,
         memberId: entry.memberId,
         amountCents: entry.amountCents,

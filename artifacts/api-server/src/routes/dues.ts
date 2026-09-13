@@ -1,6 +1,6 @@
 import { Router, Request } from "express";
 import { z } from "zod";
-import { eq, and, sql, count, lt } from "drizzle-orm";
+import { eq, and, sql, count, lt, desc, not } from "drizzle-orm";
 import {
   db,
   duesCyclesTable,
@@ -89,9 +89,10 @@ router.post("/cycles", requireAuth, async (req, res) => {
   const body = z
     .object({
       label: z.string().trim().min(1).max(64),
-      scoutAmountCents: z.number().int().min(0).optional().default(0),
-      leaderAmountCents: z.number().int().min(0).optional().default(0),
+      scoutAmountCents: z.number().int().min(0),
+      leaderAmountCents: z.number().int().min(0),
       bankAccountId: z.string().uuid().nullable().optional(),
+      isCurrent: z.boolean().optional(),
     })
     .safeParse(req.body);
   if (!body.success) {
@@ -99,15 +100,36 @@ router.post("/cycles", requireAuth, async (req, res) => {
     return;
   }
 
-  const [cycle] = await db
-    .insert(duesCyclesTable)
-    .values({
-      label: body.data.label,
-      scoutAmountCents: body.data.scoutAmountCents,
-      leaderAmountCents: body.data.leaderAmountCents,
-      bankAccountId: body.data.bankAccountId ?? null,
-    })
-    .returning();
+  const isCurrent = body.data.isCurrent ?? true;
+
+  let cycle: typeof duesCyclesTable.$inferSelect;
+  if (isCurrent) {
+    // Unmark all cycles first
+    await db
+      .update(duesCyclesTable)
+      .set({ isCurrent: false });
+    [cycle] = await db
+      .insert(duesCyclesTable)
+      .values({
+        label: body.data.label,
+        scoutAmountCents: body.data.scoutAmountCents,
+        leaderAmountCents: body.data.leaderAmountCents,
+        bankAccountId: body.data.bankAccountId ?? null,
+        isCurrent: true,
+      })
+      .returning();
+  } else {
+    [cycle] = await db
+      .insert(duesCyclesTable)
+      .values({
+        label: body.data.label,
+        scoutAmountCents: body.data.scoutAmountCents,
+        leaderAmountCents: body.data.leaderAmountCents,
+        bankAccountId: body.data.bankAccountId ?? null,
+        isCurrent: false,
+      })
+      .returning();
+  }
   res.status(201).json(cycle);
 });
 
@@ -124,6 +146,31 @@ router.patch("/cycles/:id", requireAuth, async (req, res) => {
   if (!body.success) {
     res.status(400).json({ error: "Invalid patch data" });
     return;
+  }
+
+  if (body.data.isCurrent === true) {
+    // Unmark all cycles first, then set this one
+    await db
+      .update(duesCyclesTable)
+      .set({ isCurrent: false });
+    await db
+      .update(duesCyclesTable)
+      .set({ isCurrent: true })
+      .where(sql`${duesCyclesTable.id} = ${String(req.params.id)}`);
+  } else if (body.data.isCurrent === false) {
+    // Find another cycle to become current
+    const [next] = await db
+      .select()
+      .from(duesCyclesTable)
+      .where(sql`${duesCyclesTable.isCurrent} = false`)
+      .orderBy(desc(duesCyclesTable.createdAt))
+      .limit(1);
+    if (next) {
+      await db
+        .update(duesCyclesTable)
+        .set({ isCurrent: true })
+        .where(eq(duesCyclesTable.id, next.id));
+    }
   }
 
   const [cycle] = await db
@@ -154,6 +201,23 @@ router.delete("/cycles/:id", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Cycle not found" });
     return;
   }
+
+  if (cycle.isCurrent) {
+    // Set another cycle as current before deleting
+    const [next] = await db
+      .select()
+      .from(duesCyclesTable)
+      .where(sql`${duesCyclesTable.isCurrent} = false`)
+      .orderBy(desc(duesCyclesTable.createdAt))
+      .limit(1);
+    if (next) {
+      await db
+        .update(duesCyclesTable)
+        .set({ isCurrent: true })
+        .where(eq(duesCyclesTable.id, next.id));
+    }
+  }
+
   await db.delete(duesCyclesTable).where(eq(duesCyclesTable.id, cycle.id));
   res.json({ ok: true });
 });
@@ -320,6 +384,7 @@ router.post("/:id/record-payment", requireAuth, async (req, res) => {
     .select({
       id: duesTable.id,
       isPaid: duesTable.isPaid,
+      paidAt: duesTable.paidAt,
       memberType: duesTable.memberType,
       memberId: duesTable.memberId,
       amountCents: duesTable.amountCents,
@@ -338,6 +403,7 @@ router.post("/:id/record-payment", requireAuth, async (req, res) => {
   }
 
   const paymentCents = Math.min(body.data.amountCents, dues.amountCents);
+  const isFullyPaid = paymentCents >= dues.amountCents;
 
   // Create dues_payment transaction (positive = reduces debt).
   const [tx] = await db
@@ -352,12 +418,12 @@ router.post("/:id/record-payment", requireAuth, async (req, res) => {
     })
     .returning();
 
-  // Mark as paid.
+  // Only mark as paid if fully covered.
   const [updated] = await db
     .update(duesTable)
     .set({
-      isPaid: true,
-      paidAt: new Date(),
+      isPaid: isFullyPaid,
+      paidAt: isFullyPaid ? new Date() : dues.paidAt,
       updatedAt: new Date(),
     })
     .where(eq(duesTable.id, duesId))
@@ -365,10 +431,10 @@ router.post("/:id/record-payment", requireAuth, async (req, res) => {
 
   await logDuesTransaction(
     dues.id,
-    "payment_recorded",
+    isFullyPaid ? "payment_recorded" : "partial_payment",
     (req as Request & { user?: { id: string } }).user?.id,
     paymentCents,
-    true,
+    isFullyPaid,
     false,
     undefined,
     tx?.id ?? undefined,
@@ -436,13 +502,15 @@ router.post("/apply-deposit", requireAuth, async (req, res) => {
     });
   }
 
-  // Mark applied entries as paid.
+  // Mark applied entries as paid only if fully covered.
   for (const a of applied) {
+    const entry = unpaid.find((e) => e.id === a.duesId);
+    const isFullyPaid = entry && a.amountCents >= entry.amountCents;
     await db
       .update(duesTable)
       .set({
-        isPaid: true,
-        paidAt: new Date(),
+        isPaid: isFullyPaid,
+        paidAt: isFullyPaid ? new Date() : null,
         updatedAt: new Date(),
       })
       .where(eq(duesTable.id, a.duesId));
@@ -604,6 +672,7 @@ router.post("/cycles/:cycleId/add-members", requireAuth, async (req, res) => {
     .select({
       scoutAmountCents: duesCyclesTable.scoutAmountCents,
       leaderAmountCents: duesCyclesTable.leaderAmountCents,
+      label: duesCyclesTable.label,
     })
     .from(duesCyclesTable)
     .where(eq(duesCyclesTable.id, cycleId))
@@ -639,7 +708,15 @@ router.post("/cycles/:cycleId/add-members", requireAuth, async (req, res) => {
 
   const inserted = await db.insert(duesTable).values(entries).returning();
 
+  // Create dues_assessed ledger transactions for each added member.
   for (const d of inserted) {
+    await db.insert(transactionsTable).values({
+      type: "dues_assessed" as const,
+      scoutId: d.memberType === "scout" ? d.memberId : null,
+      leaderId: d.memberType === "leader" ? d.memberId : null,
+      amountCents: -d.amountCents,
+      description: `${cycle.label} Dues`,
+    });
     await logDuesTransaction(
       d.id,
       "added_to_cycle",
@@ -777,12 +854,104 @@ router.get("/:duesId/transactions", requireAuth, async (req, res) => {
   res.json(transactions);
 });
 
+// ── Dues breakdown per member for a cycle ────────────────────────────────
+
+router.get("/cycles/:cycleId/breakdown", requireAuth, async (req, res) => {
+  const cycleId = String(req.params.cycleId);
+
+  const [cycle] = await db
+    .select({ label: duesCyclesTable.label })
+    .from(duesCyclesTable)
+    .where(eq(duesCyclesTable.id, cycleId))
+    .limit(1);
+
+  if (!cycle) {
+    res.status(404).json({ error: "Cycle not found" });
+    return;
+  }
+
+  // Fetch base dues entries.
+  const entries = await db
+    .select({
+      id: duesTable.id,
+      memberType: duesTable.memberType,
+      memberId: duesTable.memberId,
+      amountCents: duesTable.amountCents,
+      isPaid: duesTable.isPaid,
+      isWaived: duesTable.isWaived,
+      paidAt: duesTable.paidAt,
+      dueDate: duesTable.dueDate,
+    })
+    .from(duesTable)
+    .where(eq(duesTable.cycleId, cycleId))
+    .orderBy(duesTable.memberType, duesTable.memberId);
+
+  // For each entry, compute amount paid from duesTransactions.
+  const results = await Promise.all(
+    entries.map(async (entry) => {
+      const [paidRow] = await db
+        .select({ total: sql<number>`coalesce(sum(amount_cents), 0)` })
+        .from(duesTransactionsTable)
+        .where(
+          and(
+            eq(duesTransactionsTable.duesId, entry.id),
+            sql`${duesTransactionsTable.action} IN ('payment', 'payment_recorded', 'partial_payment')`,
+          ),
+        );
+
+      const paidCents = Number(paidRow?.total ?? 0);
+      const remaining = entry.amountCents - paidCents;
+
+      let status: "unpaid" | "partial" | "paid" | "overdue" | "waived" = "unpaid";
+      if (entry.isWaived) status = "waived";
+      else if (entry.isPaid) status = "paid";
+      else if (entry.dueDate && new Date(entry.dueDate) < new Date()) status = "overdue";
+      if (paidCents > 0 && remaining > 0) status = "partial";
+
+      let memberName = "—";
+      if (entry.memberId) {
+        if (entry.memberType === "scout") {
+          const [s] = await db
+            .select({ name: sql<string>`first_name || ' ' || last_name` })
+            .from(scoutsTable)
+            .where(eq(scoutsTable.id, entry.memberId));
+          memberName = s?.name || "—";
+        } else {
+          const [l] = await db
+            .select({ name: sql<string>`first_name || ' ' || last_name` })
+            .from(leadersTable)
+            .where(eq(leadersTable.id, entry.memberId));
+          memberName = l?.name || "—";
+        }
+      }
+
+      return {
+        duesId: entry.id,
+        memberType: entry.memberType,
+        memberId: entry.memberId,
+        amountCents: entry.amountCents,
+        isPaid: entry.isPaid,
+        isWaived: entry.isWaived,
+        paidAt: entry.paidAt,
+        dueDate: entry.dueDate,
+        status,
+        amountPaidCents: paidCents,
+        remainingCents: remaining,
+        memberName,
+      };
+    }),
+  );
+
+  res.json(results);
+});
+
 // ── Dues summary report ──────────────────────────────────────────────────
 
 router.get("/reports/summary", requireAuth, async (req, res) => {
   const cycleId = req.query.cycleId as string | undefined;
   const conditions = cycleId && cycleId !== "" ? and(eq(duesTable.cycleId, cycleId)) : undefined;
 
+  // Compute from ledger transactions, not raw dues table.
   const summary = await db
     .select({
       totalAmountCents: sql<number>`COALESCE(SUM(${duesTable.amountCents}), 0)`,
@@ -801,7 +970,17 @@ router.get("/reports/summary", requireAuth, async (req, res) => {
 
   const row = summary[0] || {};
   res.json({
-    summary: row,
+    summary: {
+      totalAmountCents: Number(row.totalAmountCents ?? 0),
+      paidAmountCents: Number(row.paidAmountCents ?? 0),
+      waivedAmountCents: Number(row.waivedAmountCents ?? 0),
+      scoutTotalCents: Number(row.scoutTotalCents ?? 0),
+      scoutPaidCents: Number(row.scoutPaidCents ?? 0),
+      leaderTotalCents: Number(row.leaderTotalCents ?? 0),
+      leaderPaidCents: Number(row.leaderPaidCents ?? 0),
+      memberCount: Number(row.memberCount ?? 0),
+      paidCount: Number(row.paidCount ?? 0),
+    },
     breakdowns: [],
     totalRows: Number(row.memberCount ?? 0),
   });

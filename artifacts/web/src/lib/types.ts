@@ -22,6 +22,10 @@ export interface Scout {
   createdAt: string;
   updatedAt: string;
   balanceCents?: number;
+  duesBreakdown?: {
+    assessedCents: number;
+    paidCents: number;
+  };
 }
 
 export interface Leader {
@@ -34,6 +38,10 @@ export interface Leader {
   createdAt: string;
   updatedAt: string;
   balanceCents?: number;
+  duesBreakdown?: {
+    assessedCents: number;
+    paidCents: number;
+  };
 }
 
 export interface BankAccount {
@@ -273,5 +281,7 @@ export interface DuesEntry {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
-  status?: "unpaid" | "paid" | "overdue" | "waived";
+  status?: "unpaid" | "partial" | "paid" | "overdue" | "waived";
+  amountPaidCents?: number;
+  remainingCents?: number;
 }

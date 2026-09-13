@@ -11,4 +11,5 @@ export { PageHeader } from "./PageHeader";
 export { EmptyState } from "./EmptyState";
 export { StatCard } from "./StatCard";
 export { ConfirmDialog } from "./ConfirmDialog";
+export { Switch } from "./Switch";
 export { cn } from "./cn";

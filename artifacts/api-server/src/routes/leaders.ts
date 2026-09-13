@@ -6,7 +6,7 @@ import {
   transactionsTable,
   eventParticipantsTable,
 } from "@scout-expense-tracker/db";
-import { eq, count } from "drizzle-orm";
+import { eq, count, sql, and } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { getLeaderBalance } from "../lib/queries";
 
@@ -48,7 +48,7 @@ router.post("/", requireAuth, async (req, res) => {
   res.status(201).json(leader);
 });
 
-// GET /:id — leader detail + balance.
+// GET /:id — leader detail + balance + dues breakdown.
 router.get("/:id", requireAuth, async (req, res) => {
   const [leader] = await db
     .select()
@@ -60,7 +60,42 @@ router.get("/:id", requireAuth, async (req, res) => {
     return;
   }
   const balanceCents = await getLeaderBalance(leader.id);
-  res.json({ ...leader, balanceCents });
+
+  // Dues breakdown from ledger transactions.
+  const [assessedRow] = await db
+    .select({
+      total: sql<number>`coalesce(sum(amount_cents), 0)`,
+    })
+    .from(transactionsTable as any)
+    .where(
+      and(
+        eq(transactionsTable.type as any, "dues_assessed"),
+        eq((transactionsTable as any).leaderId, leader.id),
+      ),
+    );
+
+  const [paidRow] = await db
+    .select({
+      total: sql<number>`coalesce(sum(amount_cents), 0)`,
+    })
+    .from(transactionsTable as any)
+    .where(
+      and(
+        eq(transactionsTable.type as any, "dues_payment"),
+        eq((transactionsTable as any).leaderId, leader.id),
+      ),
+    );
+
+  const assessedCents = Math.abs(Number(assessedRow?.total ?? 0));
+  const paidCents = Number(paidRow?.total ?? 0);
+  res.json({
+    ...leader,
+    balanceCents,
+    duesBreakdown: {
+      assessedCents,
+      paidCents,
+    },
+  });
 });
 
 // GET /:id/ledger — chronological ledger for the leader.

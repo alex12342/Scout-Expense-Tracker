@@ -15,6 +15,8 @@ import {
   PageHeader,
   Select,
   Spinner,
+  StatCard,
+  Switch,
   Table,
   TableBody,
   TableHead,
@@ -35,6 +37,12 @@ const LEADER_POSITIONS = [
   "Troutmaster",
   "Scribe",
   "Other",
+  "Committee Member",
+  "Quartermaster",
+  "Charter Org Rep",
+  "Advancement Chair",
+  "Committee Chair",
+  "Eagle Guide",
 ];
 
 export default function LeaderDetailPage() {
@@ -45,6 +53,7 @@ export default function LeaderDetailPage() {
   const [editFirstName, setEditFirstName] = useState("");
   const [editLastName, setEditLastName] = useState("");
   const [editPosition, setEditPosition] = useState("");
+  const [editActive, setEditActive] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [showAddTx, setShowAddTx] = useState(false);
   const [txType, setTxType] = useState("scout_deposit");
@@ -70,19 +79,8 @@ export default function LeaderDetailPage() {
     queryFn: () => api.listAccounts(),
   });
 
-  const { data: duesEntries } = useQuery({
-    queryKey: ["leader", params?.id, "dues"],
-    queryFn: async () => {
-      const allCycles = await api.listDuesCycles();
-      const allEntries = await Promise.all(allCycles.map((c) => api.listDuesEntries(c.id)));
-      const flat = allEntries.flat();
-      return flat.filter((e) => e.memberType === "leader" && e.memberId === params?.id);
-    },
-    enabled: !!params?.id,
-  });
-
-  const totalAssessed = duesEntries?.reduce((s, e) => s + e.amountCents, 0) ?? 0;
-  const totalPaid = duesEntries?.filter((e) => e.isPaid).reduce((s, e) => s + e.amountCents, 0) ?? 0;
+  const totalAssessed = leader?.duesBreakdown?.assessedCents ?? 0;
+  const totalPaid = leader?.duesBreakdown?.paidCents ?? 0;
   const totalRemaining = totalAssessed - totalPaid;
 
   const updateMut = useMutation({
@@ -91,6 +89,7 @@ export default function LeaderDetailPage() {
         firstName: editFirstName,
         lastName: editLastName,
         position: editPosition || undefined,
+        isActive: editActive,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["leader", params?.id] });
@@ -194,6 +193,13 @@ export default function LeaderDetailPage() {
 
   return (
     <div className="space-y-6">
+      <Link href="/leaders" className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-pine">
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+        </svg>
+        All Leaders
+      </Link>
+
       <PageHeader
         title={`${leader.firstName} ${leader.lastName}`}
         description={leader.position ?? "Leader"}
@@ -203,85 +209,55 @@ export default function LeaderDetailPage() {
               setEditFirstName(leader.firstName);
               setEditLastName(leader.lastName);
               setEditPosition(leader.position ?? "");
+              setEditActive(leader.isActive);
               setShowEdit(true);
-            }}>
-              Edit
+            }} title="Edit leader">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82H4.158l3.575-3.575L16.862 4.487Zm0 0L19.5 16.5" />
+              </svg>
             </Button>
-            <Button variant="ghost" onClick={() => setDeleteConfirm(true)}>
-              Delete
+            <Button variant="ghost" onClick={() => setDeleteConfirm(true)} title="Delete leader">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+              </svg>
             </Button>
+            <Button onClick={() => setShowAddTx(true)}>Record Transaction</Button>
           </div>
         }
       />
 
-      {/* Info card */}
-      <Card>
-        <CardContent className="pt-4">
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <div>
-              <dt className="text-sm text-muted">First Name</dt>
-              <dd className="font-medium">{leader.firstName}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-muted">Last Name</dt>
-              <dd className="font-medium">{leader.lastName}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-muted">Position</dt>
-              <dd className="font-medium">{leader.position ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-muted">Status</dt>
-              <dd>
-                {leader.isActive ? (
-                  <Badge variant="success">Active</Badge>
-                ) : (
-                  <Badge variant="muted">Inactive</Badge>
-                )}
-              </dd>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Dues summary across all cycles */}
-      {duesEntries && duesEntries.length > 0 && (
-        <Card>
+      {/* Dues summary from ledger transactions */}
+      {leader && (totalAssessed > 0 || totalPaid > 0) && (
+        <Card className="mb-6">
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-semibold text-ink">Dues Summary (All Cycles)</h3>
+                <h3 className="text-sm font-semibold text-ink">Dues (All Cycles)</h3>
                 <p className="text-xs text-muted">
                   Assessed: {formatMoney(totalAssessed)} · Paid: {formatMoney(totalPaid)} · Remaining: {formatMoney(totalRemaining)}
                 </p>
               </div>
-              <a href="/dues">
+              <Link href="/dues">
                 <Button variant="outline" size="sm">View Dues</Button>
-              </a>
+              </Link>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Balance */}
-      <Card>
-        <CardContent className="pt-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted">Ledger Balance</span>
-            <span
-              className={`font-mono text-lg tnum ${
-                (leader.balanceCents ?? 0) < 0
-                  ? "text-ember"
-                  : (leader.balanceCents ?? 0) > 0
-                    ? "text-moss"
-                    : "text-ink"
-              }`}
-            >
-              {formatMoney(leader.balanceCents ?? 0)}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard
+          label="Balance"
+          value={formatMoney(leader.balanceCents ?? 0)}
+          tone={(leader.balanceCents ?? 0) < 0 ? "negative" : (leader.balanceCents ?? 0) > 0 ? "positive" : "default"}
+          sub={(leader.balanceCents ?? 0) < 0 ? "Owes troop" : (leader.balanceCents ?? 0) > 0 ? "Troop owes leader" : "Even"}
+        />
+        <StatCard
+          label="Status"
+          value={leader.isActive ? "Active" : "Inactive"}
+          tone={leader.isActive ? "positive" : "default"}
+        />
+      </div>
 
       {/* Ledger */}
       {ledgerData && (
@@ -371,7 +347,7 @@ export default function LeaderDetailPage() {
             onChange={(e) => setTxAmount(e.target.value)}
             placeholder="50.00"
           />
-          {txType === "scout_deposit" && duesEntries && duesEntries.some((e) => !e.isPaid && !e.isWaived) && (
+          {txType === "scout_deposit" && totalRemaining > 0 && (
             <div className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -445,6 +421,10 @@ export default function LeaderDetailPage() {
               ...LEADER_POSITIONS.map((p) => ({ value: p, label: p })),
             ]}
           />
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-ink">Active</span>
+            <Switch checked={editActive} onChange={setEditActive} />
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setShowEdit(false)}>Cancel</Button>

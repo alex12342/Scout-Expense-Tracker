@@ -281,6 +281,7 @@ export const api = {
     scoutAmountCents?: number;
     leaderAmountCents?: number;
     bankAccountId?: string | null;
+    isCurrent?: boolean;
   }) => request<DuesCycle>("POST", "/dues/cycles", body),
   updateDuesCycle: (
     id: string,
@@ -326,6 +327,8 @@ export const api = {
     const qs = cycleId ? `cycleId=${cycleId}` : "";
     return request<{ summary: any; breakdowns: DuesEntry[]; totalRows: number }>("GET", `/dues/reports/summary${qs ? `?${qs}` : ""}`);
   },
+  getDuesBreakdown: (cycleId: string) =>
+    request<DuesEntry[]>("GET", `/dues/cycles/${cycleId}/breakdown`),
   recordDuesPayment: (duesId: string, amountCents: number, bankAccountId: string) =>
     request<DuesEntry>("POST", `/dues/${duesId}/record-payment`, { amountCents, bankAccountId }),
   applyDeposit: (memberType: "scout" | "leader", memberId: string, amountCents: number, bankAccountId: string) =>

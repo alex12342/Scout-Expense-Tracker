@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { api } from "../lib/api";
 import { DuesEntry, DuesCycle, BankAccount } from "../lib/types";
 import { formatMoney } from "../lib/money";
@@ -42,6 +43,8 @@ export default function DuesPage() {
   const [cycleLabel, setCycleLabel] = useState("");
   const [scoutRate, setScoutRate] = useState("");
   const [leaderRate, setLeaderRate] = useState("");
+  const [isNewCycleCurrent, setIsNewCycleCurrent] = useState(true);
+  const [isEditCycleCurrent, setIsEditCycleCurrent] = useState(false);
 
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentBankId, setPaymentBankId] = useState("");
@@ -53,7 +56,7 @@ export default function DuesPage() {
 
   const { data: entries } = useQuery({
     queryKey: ["dues-entries", selectedCycle],
-    queryFn: () => api.listDuesEntries(selectedCycle),
+    queryFn: () => api.getDuesBreakdown(selectedCycle),
     enabled: !!selectedCycle,
   });
 
@@ -77,9 +80,13 @@ export default function DuesPage() {
     queryFn: () => api.listLeaders(),
   });
 
-  const defaultCycle = cycles && cycles.length > 0
-    ? cycles.reduce((a, b) => (a.createdAt > b.createdAt ? a : b))
-    : null;
+  const defaultCycle = cycles?.find((c) => c.isCurrent) ?? cycles?.[0] ?? null;
+
+  useEffect(() => {
+    if (defaultCycle && !selectedCycle) {
+      setSelectedCycle(defaultCycle.id);
+    }
+  }, [defaultCycle, selectedCycle]);
 
   const cycleEntries = entries ?? [];
 
@@ -90,6 +97,7 @@ export default function DuesPage() {
         scoutAmountCents: Math.round(parseFloat(scoutRate) * 100),
         leaderAmountCents: Math.round(parseFloat(leaderRate) * 100),
         bankAccountId: editingBankId || null,
+        isCurrent: isNewCycleCurrent,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["dues-cycles"] });
@@ -99,6 +107,7 @@ export default function DuesPage() {
       setScoutRate("");
       setLeaderRate("");
       setEditingBankId("");
+      setIsNewCycleCurrent(true);
     },
   });
 
@@ -210,6 +219,7 @@ export default function DuesPage() {
     setScoutRate(String(Math.round(cycle.scoutAmountCents / 100)));
     setLeaderRate(String(Math.round(cycle.leaderAmountCents / 100)));
     setEditingBankId(cycle.bankAccountId ?? "");
+    setIsEditCycleCurrent(cycle.isCurrent);
     setShowEditCycle(true);
   };
 
@@ -257,8 +267,13 @@ export default function DuesPage() {
   };
 
   const getStatusBadge = (entry: DuesEntry) => {
-    const status = entry.isWaived ? "waived" : entry.isPaid ? "paid" : entry.dueDate ? (new Date(entry.dueDate) < new Date() ? "overdue" : "unpaid") : "unpaid";
-    const variant = status === "paid" ? "success" : status === "waived" ? "muted" : status === "overdue" ? "destructive" : "warning";
+    let status = entry.isWaived ? "waived" : entry.isPaid ? "paid" : entry.dueDate ? (new Date(entry.dueDate) < new Date() ? "overdue" : "unpaid") : "unpaid";
+    const amountPaid = entry.amountPaidCents ?? 0;
+    const remaining = entry.remainingCents ?? entry.amountCents - amountPaid;
+    if (amountPaid > 0 && remaining > 0) {
+      status = "partial";
+    }
+    const variant = status === "paid" ? "success" : status === "partial" ? "warning" : status === "waived" ? "muted" : status === "overdue" ? "destructive" : "warning";
     return <Badge variant={variant}>{status}</Badge>;
   };
 
@@ -350,7 +365,8 @@ export default function DuesPage() {
                     <TableHeader>Name</TableHeader>
                     <TableHeader>Type</TableHeader>
                     <TableHeader className="text-right">Amount</TableHeader>
-                    <TableHeader>Due Date</TableHeader>
+                    <TableHeader className="text-right">Amount Paid</TableHeader>
+                    <TableHeader className="text-right">Remaining</TableHeader>
                     <TableHeader>Status</TableHeader>
                     <TableHeader>Actions</TableHeader>
                   </TableRow>
@@ -366,14 +382,28 @@ export default function DuesPage() {
                           className="h-4 w-4"
                         />
                       </TableCell>
-                      <TableCell className="font-medium">{getMemberName(entry)}</TableCell>
+                      <TableCell>
+                        {entry.memberId && (
+                          <Link href={entry.memberType === "scout" ? `/scouts/${entry.memberId}` : `/leaders/${entry.memberId}`}>
+                            <span className="cursor-pointer font-medium hover:text-pine hover:underline">{getMemberName(entry)}</span>
+                          </Link>
+                        )}
+                        {!entry.memberId && "—"}
+                      </TableCell>
                       <TableCell>
                         <Badge variant="default">{entry.memberType}</Badge>
                       </TableCell>
                       <TableCell className="text-right font-mono tnum">
                         {formatMoney(entry.amountCents)}
                       </TableCell>
-                      <TableCell>{entry.dueDate ? new Date(entry.dueDate).toLocaleDateString() : "—"}</TableCell>
+                      <TableCell className="text-right font-mono tnum text-moss">
+                        {formatMoney(entry.amountPaidCents ?? 0)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono tnum">
+                        <span className={(entry.remainingCents ?? entry.amountCents - (entry.amountPaidCents ?? 0)) > 0 ? "text-ember" : "text-moss"}>
+                          {formatMoney(entry.remainingCents ?? entry.amountCents - (entry.amountPaidCents ?? 0))}
+                        </span>
+                      </TableCell>
                       <TableCell>{getStatusBadge(entry)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
@@ -439,6 +469,14 @@ export default function DuesPage() {
               options={bankAccounts.map((a) => ({ value: a.id, label: `${a.name} (${a.accountType})` }))}
             />
           )}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={isNewCycleCurrent}
+              onChange={(e) => setIsNewCycleCurrent(e.target.checked)}
+            />
+            Set as current cycle
+          </label>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setShowAddCycle(false)}>Cancel</Button>
@@ -462,6 +500,21 @@ export default function DuesPage() {
               options={bankAccounts.map((a) => ({ value: a.id, label: `${a.name} (${a.accountType})` }))}
             />
           )}
+          {cycles && (() => {
+            const currentCycle = cycles.find((c) => c.isCurrent);
+            const isCurrent = currentCycle?.id === selectedCycle;
+            return (
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={isEditCycleCurrent}
+                  onChange={(e) => setIsEditCycleCurrent(e.target.checked)}
+                  disabled={isCurrent}
+                />
+                {isCurrent ? "Current cycle" : "Set as current cycle"}
+              </label>
+            );
+          })()}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setShowEditCycle(false)}>Cancel</Button>
@@ -473,7 +526,7 @@ export default function DuesPage() {
                 label: cycleLabel,
                 scoutAmountCents: Math.round(parseFloat(scoutRate) * 100),
                 leaderAmountCents: Math.round(parseFloat(leaderRate) * 100),
-                isCurrent: false,
+                isCurrent: isEditCycleCurrent,
                 bankAccountId: editingBankId || null,
               });
             }
@@ -547,10 +600,11 @@ export default function DuesPage() {
           <Button variant="ghost" onClick={() => setShowRecordPayment(false)}>Cancel</Button>
           <Button onClick={() => {
             const cents = Math.round(parseFloat(paymentAmount) * 100);
-            if (!isNaN(cents) && cents > 0 && editingEntry && paymentBankId) {
-              recordPaymentMut.mutate({ duesId: editingEntry.id, amountCents: cents, bankAccountId: paymentBankId });
+            const bankId = paymentBankId || (bankAccounts && bankAccounts.length > 0 ? bankAccounts[0].id : "");
+            if (!isNaN(cents) && cents > 0 && editingEntry && bankId) {
+              recordPaymentMut.mutate({ duesId: editingEntry.id, amountCents: cents, bankAccountId: bankId });
             }
-          }} disabled={recordPaymentMut.isPending || !paymentAmount || !paymentBankId}>
+          }} disabled={recordPaymentMut.isPending || !paymentAmount || !bankAccounts || bankAccounts.length === 0}>
             {recordPaymentMut.isPending ? "Recording…" : "Record Payment"}
           </Button>
         </DialogFooter>

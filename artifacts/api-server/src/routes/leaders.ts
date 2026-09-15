@@ -109,7 +109,7 @@ router.get("/:id/ledger", requireAuth, async (req, res) => {
   }
   const balanceCents = await getLeaderBalance(leader.id);
   const { listLedger } = await import("../lib/queries");
-  const entries = await listLedger({ leaderId: leader.id });
+  const entries = await listLedger({ leaderId: leader.id, order: 'desc' });
   res.json({ balanceCents, entries });
 });
 

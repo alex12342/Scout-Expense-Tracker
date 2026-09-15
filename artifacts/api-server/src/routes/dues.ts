@@ -1,6 +1,6 @@
 import { Router, Request } from "express";
 import { z } from "zod";
-import { eq, and, sql, count, lt, desc, not } from "drizzle-orm";
+import { eq, and, inArray, sql, count, lt, desc, not } from "drizzle-orm";
 import {
   db,
   duesCyclesTable,
@@ -38,6 +38,76 @@ async function logDuesTransaction(
       note: note ?? null,
       transactionId: transactionId ?? null,
     });
+}
+
+// Audit-trail actions that represent actual payments against a dues entry.
+const DUES_PAYMENT_ACTIONS = ["payment", "payment_recorded", "partial_payment"];
+
+// Total already paid toward a dues entry (from the payment audit trail).
+async function paidToDateCents(duesId: string): Promise<number> {
+  const [row] = await db
+    .select({ total: sql<number>`coalesce(sum(${duesTransactionsTable.amountCents}), 0)` })
+    .from(duesTransactionsTable)
+    .where(
+      and(
+        eq(duesTransactionsTable.duesId, duesId),
+        inArray(duesTransactionsTable.action, DUES_PAYMENT_ACTIONS),
+      ),
+    );
+  return Number(row?.total ?? 0);
+}
+
+type DuesPaymentStateRow = {
+  id: string;
+  amountCents: number;
+  isPaid: boolean;
+  isWaived: boolean;
+  dueDate: string | null;
+};
+
+type DuesPaymentState = {
+  isPaid: boolean;
+  amountPaidCents: number;
+  remainingCents: number;
+  status: "unpaid" | "partial" | "paid" | "overdue" | "waived";
+};
+
+// Attach paid-to-date, remaining, effective isPaid, and status to dues rows.
+// An entry whose partial payments sum to the full amount counts as paid
+// even if the isPaid flag was never flipped.
+async function withDuesPaymentState<T extends DuesPaymentStateRow>(
+  entries: T[],
+): Promise<Array<T & DuesPaymentState>> {
+  const entryIds = entries.map((e) => e.id);
+  const paidSums = entryIds.length
+    ? await db
+        .select({
+          duesId: duesTransactionsTable.duesId,
+          total: sql<number>`coalesce(sum(${duesTransactionsTable.amountCents}), 0)`,
+        })
+        .from(duesTransactionsTable)
+        .where(
+          and(
+            inArray(duesTransactionsTable.duesId, entryIds),
+            inArray(duesTransactionsTable.action, DUES_PAYMENT_ACTIONS),
+          ),
+        )
+        .groupBy(duesTransactionsTable.duesId)
+    : [];
+  const paidMap = new Map(paidSums.map((r) => [r.duesId, Number(r.total)]));
+  const today = new Date();
+  return entries.map((e) => {
+    const amountPaidCents = Math.min(e.amountCents, paidMap.get(e.id) ?? 0);
+    const remainingCents = Math.max(0, e.amountCents - amountPaidCents);
+    const isPaid = e.isPaid || (e.amountCents > 0 && amountPaidCents >= e.amountCents);
+    let status: DuesPaymentState["status"];
+    if (e.isWaived) status = "waived";
+    else if (isPaid) status = "paid";
+    else if (amountPaidCents > 0 && remainingCents > 0) status = "partial";
+    else if (e.dueDate && new Date(e.dueDate) < today) status = "overdue";
+    else status = "unpaid";
+    return { ...e, isPaid, amountPaidCents, remainingCents, status };
+  });
 }
 
 // Create a ledger transaction when a dues entry is marked paid.
@@ -241,14 +311,6 @@ router.get("/cycles/:cycleId/dues", requireAuth, async (req, res) => {
       notes: duesTable.notes,
       createdAt: duesTable.createdAt,
       updatedAt: duesTable.updatedAt,
-      status: sql<"unpaid" | "paid" | "overdue" | "waived">`case
-        when ${duesTable.isWaived} = true then 'waived'
-        when ${duesTable.isPaid} = true then 'paid'
-        when ${duesTable.dueDate} is not null and ${duesTable.dueDate} < current_date then 'overdue'
-        else 'unpaid'
-      end`.mapWith(
-        (v) => (v ?? "unpaid") as "unpaid" | "paid" | "overdue" | "waived",
-      ),
       memberName: sql<string>`
         case
           when ${duesTable.memberType} = 'scout' then (select ${scoutsTable.firstName} || ' ' || ${scoutsTable.lastName} from ${scoutsTable} where ${scoutsTable.id} = ${duesTable.memberId})
@@ -259,7 +321,7 @@ router.get("/cycles/:cycleId/dues", requireAuth, async (req, res) => {
     .from(duesTable)
     .where(eq(duesTable.cycleId, cycleId));
 
-  res.json(entries);
+  res.json(await withDuesPaymentState(entries));
 });
 
 router.post("/cycles/:cycleId/dues", requireAuth, async (req, res) => {
@@ -397,13 +459,15 @@ router.post("/:id/record-payment", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Dues entry not found" });
     return;
   }
-  if (dues.isPaid) {
-    res.status(400).json({ error: "Already marked paid" });
+  const paidToDate = await paidToDateCents(dues.id);
+  const remainingCents = Math.max(0, dues.amountCents - paidToDate);
+  if (dues.isPaid || remainingCents <= 0) {
+    res.status(400).json({ error: "Dues already fully paid" });
     return;
   }
 
-  const paymentCents = Math.min(body.data.amountCents, dues.amountCents);
-  const isFullyPaid = paymentCents >= dues.amountCents;
+  const paymentCents = Math.min(body.data.amountCents, remainingCents);
+  const isFullyPaid = paidToDate + paymentCents >= dues.amountCents;
 
   // Create dues_payment transaction (positive = reduces debt).
   const [tx] = await db
@@ -459,7 +523,7 @@ router.post("/apply-deposit", requireAuth, async (req, res) => {
   }
 
   const remaining = body.data.amountCents;
-  const applied: { duesId: string; amountCents: number }[] = [];
+  const applied: { duesId: string; amountCents: number; fullyPaid: boolean }[] = [];
   let balance = remaining;
 
   // Get all unpaid dues for this member, oldest first.
@@ -468,6 +532,8 @@ router.post("/apply-deposit", requireAuth, async (req, res) => {
       id: duesTable.id,
       amountCents: duesTable.amountCents,
       isPaid: duesTable.isPaid,
+      isWaived: duesTable.isWaived,
+      paidAt: duesTable.paidAt,
       memberType: duesTable.memberType,
       memberId: duesTable.memberId,
       cycleId: duesTable.cycleId,
@@ -485,35 +551,51 @@ router.post("/apply-deposit", requireAuth, async (req, res) => {
 
   for (const entry of unpaid) {
     if (balance <= 0) break;
-    const applyAmount = Math.min(entry.amountCents, balance);
-    applied.push({ duesId: entry.id, amountCents: applyAmount });
+    const paidToDate = await paidToDateCents(entry.id);
+    const remaining = Math.max(0, entry.amountCents - paidToDate);
+    if (remaining <= 0) continue;
+    const applyAmount = Math.min(remaining, balance);
+    applied.push({
+      duesId: entry.id,
+      amountCents: applyAmount,
+      fullyPaid: paidToDate + applyAmount >= entry.amountCents,
+    });
     balance -= applyAmount;
   }
 
-  // Create dues_payment transactions for each applied entry.
-  for (const a of applied) {
-    await db.insert(transactionsTable).values({
-      type: "dues_payment",
-      scoutId: body.data.memberType === "scout" ? body.data.memberId : null,
-      leaderId: body.data.memberType === "leader" ? body.data.memberId : null,
-      bankAccountId: body.data.bankAccountId,
-      amountCents: a.amountCents,
-      description: "Deposit applied to dues",
-    });
-  }
-
-  // Mark applied entries as paid only if fully covered.
+  // Ledger transaction + dues update + audit trail per applied entry.
   for (const a of applied) {
     const entry = unpaid.find((e) => e.id === a.duesId);
-    const isFullyPaid = entry && a.amountCents >= entry.amountCents;
+    if (!entry) continue;
+    const [tx] = await db
+      .insert(transactionsTable)
+      .values({
+        type: "dues_payment",
+        scoutId: body.data.memberType === "scout" ? body.data.memberId : null,
+        leaderId: body.data.memberType === "leader" ? body.data.memberId : null,
+        bankAccountId: body.data.bankAccountId,
+        amountCents: a.amountCents,
+        description: "Deposit applied to dues",
+      })
+      .returning();
     await db
       .update(duesTable)
       .set({
-        isPaid: isFullyPaid,
-        paidAt: isFullyPaid ? new Date() : null,
+        isPaid: a.fullyPaid,
+        paidAt: a.fullyPaid ? new Date() : entry.paidAt,
         updatedAt: new Date(),
       })
       .where(eq(duesTable.id, a.duesId));
+    await logDuesTransaction(
+      entry.id,
+      a.fullyPaid ? "payment_recorded" : "partial_payment",
+      (req as Request & { user?: { id: string } }).user?.id,
+      a.amountCents,
+      a.fullyPaid,
+      entry.isWaived,
+      "Deposit applied",
+      tx?.id,
+    );
   }
 
   // Create scout_deposit transaction only for remaining balance after applying to dues.
@@ -888,61 +970,52 @@ router.get("/cycles/:cycleId/breakdown", requireAuth, async (req, res) => {
     .where(eq(duesTable.cycleId, cycleId))
     .orderBy(duesTable.memberType, duesTable.memberId);
 
-  // For each entry, compute amount paid from duesTransactions.
-  const results = await Promise.all(
-    entries.map(async (entry) => {
-      const [paidRow] = await db
-        .select({ total: sql<number>`coalesce(sum(amount_cents), 0)` })
-        .from(duesTransactionsTable)
-        .where(
-          and(
-            eq(duesTransactionsTable.duesId, entry.id),
-            sql`${duesTransactionsTable.action} IN ('payment', 'payment_recorded', 'partial_payment')`,
-          ),
-        );
+  // Batch member names (avoids per-entry queries).
+  const scoutIds = [
+    ...new Set(entries.filter((e) => e.memberType === "scout" && e.memberId).map((e) => e.memberId as string)),
+  ];
+  const leaderIds = [
+    ...new Set(entries.filter((e) => e.memberType === "leader" && e.memberId).map((e) => e.memberId as string)),
+  ];
+  const [scoutNames, leaderNames] = await Promise.all([
+    scoutIds.length
+      ? db
+          .select({ id: scoutsTable.id, name: sql<string>`first_name || ' ' || last_name` })
+          .from(scoutsTable)
+          .where(inArray(scoutsTable.id, scoutIds))
+      : Promise.resolve([] as Array<{ id: string; name: string }>),
+    leaderIds.length
+      ? db
+          .select({ id: leadersTable.id, name: sql<string>`first_name || ' ' || last_name` })
+          .from(leadersTable)
+          .where(inArray(leadersTable.id, leaderIds))
+      : Promise.resolve([] as Array<{ id: string; name: string }>),
+  ]);
+  const scoutNameMap = new Map(scoutNames.map((s) => [s.id, s.name]));
+  const leaderNameMap = new Map(leaderNames.map((l) => [l.id, l.name]));
 
-      const paidCents = Number(paidRow?.total ?? 0);
-      const remaining = entry.amountCents - paidCents;
-
-      let status: "unpaid" | "partial" | "paid" | "overdue" | "waived" = "unpaid";
-      if (entry.isWaived) status = "waived";
-      else if (entry.isPaid) status = "paid";
-      else if (entry.dueDate && new Date(entry.dueDate) < new Date()) status = "overdue";
-      if (paidCents > 0 && remaining > 0) status = "partial";
-
-      let memberName = "—";
-      if (entry.memberId) {
-        if (entry.memberType === "scout") {
-          const [s] = await db
-            .select({ name: sql<string>`first_name || ' ' || last_name` })
-            .from(scoutsTable)
-            .where(eq(scoutsTable.id, entry.memberId));
-          memberName = s?.name || "—";
-        } else {
-          const [l] = await db
-            .select({ name: sql<string>`first_name || ' ' || last_name` })
-            .from(leadersTable)
-            .where(eq(leadersTable.id, entry.memberId));
-          memberName = l?.name || "—";
-        }
-      }
-
-      return {
-        id: entry.id,
-        memberType: entry.memberType,
-        memberId: entry.memberId,
-        amountCents: entry.amountCents,
-        isPaid: entry.isPaid,
-        isWaived: entry.isWaived,
-        paidAt: entry.paidAt,
-        dueDate: entry.dueDate,
-        status,
-        amountPaidCents: paidCents,
-        remainingCents: remaining,
-        memberName,
-      };
-    }),
-  );
+  // Paid-to-date, remaining, effective isPaid, and status from the audit trail.
+  const results = (await withDuesPaymentState(entries)).map((entry) => {
+    const memberName = entry.memberId
+      ? entry.memberType === "scout"
+        ? scoutNameMap.get(entry.memberId) || "—"
+        : leaderNameMap.get(entry.memberId) || "—"
+      : "—";
+    return {
+      id: entry.id,
+      memberType: entry.memberType,
+      memberId: entry.memberId,
+      amountCents: entry.amountCents,
+      isPaid: entry.isPaid,
+      isWaived: entry.isWaived,
+      paidAt: entry.paidAt,
+      dueDate: entry.dueDate,
+      status: entry.status,
+      amountPaidCents: entry.amountPaidCents,
+      remainingCents: entry.remainingCents,
+      memberName,
+    };
+  });
 
   res.json(results);
 });
@@ -953,18 +1026,21 @@ router.get("/reports/summary", requireAuth, async (req, res) => {
   const cycleId = req.query.cycleId as string | undefined;
   const conditions = cycleId && cycleId !== "" ? and(eq(duesTable.cycleId, cycleId)) : undefined;
 
-  // Compute from ledger transactions, not raw dues table.
+  // Paid counts the actual amount received (partial payments included),
+  // capped at the assessed amount. Waived entries count as fully waived and
+  // contribute nothing to paid/outstanding.
+  const paidSub = sql<number>`(select sum(dt.amount_cents) from dues_transactions dt where dt.dues_id = ${duesTable.id} and dt.action in ('payment','payment_recorded','partial_payment'))`;
   const summary = await db
     .select({
       totalAmountCents: sql<number>`COALESCE(SUM(${duesTable.amountCents}), 0)`,
-      paidAmountCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
+      paidAmountCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${paidSub}, 0)) END), 0)`,
       waivedAmountCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.isWaived} THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
       scoutTotalCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'scout' THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
-      scoutPaidCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'scout' AND ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
+      scoutPaidCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'scout' THEN CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${paidSub}, 0)) END ELSE 0 END), 0)`,
       leaderTotalCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'leader' THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
-      leaderPaidCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'leader' AND ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END), 0)`,
+      leaderPaidCents: sql<number>`COALESCE(SUM(CASE WHEN ${duesTable.memberType} = 'leader' THEN CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${paidSub}, 0)) END ELSE 0 END), 0)`,
       memberCount: sql<number>`COUNT(*)`,
-      paidCount: sql<number>`COUNT(CASE WHEN ${duesTable.isPaid} THEN 1 END)`,
+      paidCount: sql<number>`COUNT(CASE WHEN ${duesTable.isPaid} OR (${duesTable.isWaived} = false AND ${duesTable.amountCents} > 0 AND coalesce(${paidSub}, 0) >= ${duesTable.amountCents}) THEN 1 END)`,
     })
     .from(duesTable)
     .where(conditions)

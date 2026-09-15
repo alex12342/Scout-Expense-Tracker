@@ -10,6 +10,7 @@ import dashboardRouter from "./dashboard";
 import duesRouter from "./dues";
 import importRouter from "./import";
 import reportsRouter from "./reports";
+import backupRouter from "./backup";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use("/events", eventsRouter);
 router.use("/dues", duesRouter);
 router.use("/import", importRouter);
 router.use("/reports", reportsRouter);
+router.use("/backup", backupRouter);
 
 export default router;

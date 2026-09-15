@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   db,
   scoutsTable,
+  leadersTable,
   transactionsTable,
   eventParticipantsTable,
   duesTable,
@@ -128,7 +129,7 @@ router.get("/:id/ledger", requireAuth, async (req, res) => {
     return;
   }
   const balanceCents = await getScoutBalance(scout.id);
-  const entries = await listLedger({ scoutId: scout.id });
+  const entries = await listLedger({ scoutId: scout.id, order: 'desc' });
   res.json({ balanceCents, entries });
 });
 
@@ -200,6 +201,74 @@ router.delete("/:id", requireAuth, async (req, res) => {
 
   await db.delete(scoutsTable).where(eq(scoutsTable.id, scout.id));
   res.json({ ok: true });
+});
+
+// ── POST /:id/convert-to-leader ─────────────────────────────────────────────
+
+const convertSchema = z.object({
+  position: z.enum(["assistant_leader", "tight_leader", "den_chief", "committee_chair", "treasurer", "secretary", "other"]).optional(),
+});
+
+router.post("/:id/convert-to-leader", requireAuth, async (req, res) => {
+  const parsed = convertSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid input", issues: parsed.error.flatten() });
+    return;
+  }
+
+  const scoutId = String(req.params.id);
+  const position = parsed.data.position;
+
+  const [scout] = await db
+    .select()
+    .from(scoutsTable)
+    .where(eq(scoutsTable.id, scoutId))
+    .limit(1);
+
+  if (!scout) {
+    res.status(404).json({ error: "Scout not found" });
+    return;
+  }
+
+  if (!scout.isActive) {
+    res.status(400).json({ error: "Cannot convert an inactive scout" });
+    return;
+  }
+
+  const leader = await db.transaction(async (tx) => {
+    const [newLeader] = await tx
+      .insert(leadersTable)
+      .values({
+        firstName: scout.firstName,
+        lastName: scout.lastName,
+        name: `${scout.firstName} ${scout.lastName}`,
+        position: position ?? null,
+        isActive: true,
+      })
+      .returning();
+
+    await tx
+      .update(transactionsTable)
+      .set({ scoutId: null, leaderId: newLeader.id })
+      .where(and(
+        eq(transactionsTable.scoutId, scoutId),
+        sql`${transactionsTable.leaderId} IS NULL`,
+      ));
+
+    await tx
+      .update(eventParticipantsTable)
+      .set({ scoutId: null, leaderId: newLeader.id })
+      .where(eq(eventParticipantsTable.scoutId, scoutId));
+
+    await tx
+      .update(scoutsTable)
+      .set({ isActive: false })
+      .where(eq(scoutsTable.id, scoutId));
+
+    return newLeader;
+  });
+
+  res.json(leader);
 });
 
 export default router;

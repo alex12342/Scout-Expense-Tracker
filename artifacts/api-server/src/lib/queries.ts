@@ -5,7 +5,7 @@ import {
   leadersTable,
   bankAccountsTable,
 } from "@scout-expense-tracker/db";
-import { sql, and, eq } from "drizzle-orm";
+import { sql, and, eq, desc, asc } from "drizzle-orm";
 import type { Transaction, Scout, BankAccount, Leader } from "@scout-expense-tracker/db";
 
 /** Scout balance = SUM(amountCents) over the scout's ledger. */
@@ -68,6 +68,7 @@ export async function listLedger(opts?: {
   bankAccountId?: string;
   limit?: number;
   offset?: number;
+  order?: "asc" | "desc";
 }): Promise<
   (Transaction & {
     scoutName: string | null;
@@ -82,6 +83,8 @@ export async function listLedger(opts?: {
     conditions.push(eq(transactionsTable.leaderId, opts.leaderId));
   if (opts?.bankAccountId)
     conditions.push(eq(transactionsTable.bankAccountId, opts.bankAccountId));
+
+  const order = opts?.order ?? "asc";
 
   const rows = await db
     .select({
@@ -104,7 +107,11 @@ export async function listLedger(opts?: {
       eq(transactionsTable.bankAccountId, bankAccountsTable.id),
     )
     .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(transactionsTable.occurredAt, transactionsTable.createdAt)
+    .orderBy(
+      ...(order === "desc"
+        ? [desc(transactionsTable.occurredAt), desc(transactionsTable.createdAt)]
+        : [asc(transactionsTable.occurredAt), asc(transactionsTable.createdAt)]),
+    )
     .limit(opts?.limit ?? 500)
     .offset(opts?.offset ?? 0);
 

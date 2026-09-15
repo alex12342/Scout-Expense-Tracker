@@ -235,6 +235,7 @@ export interface DuesSummaryRow {
   isCurrent: boolean;
   totalDueCents: number;
   totalPaidCents: number;
+  totalWaivedCents?: number;
   outstandingCents: number;
   memberCount: number;
   paidCount: number;

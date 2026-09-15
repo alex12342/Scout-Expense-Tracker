@@ -107,6 +107,23 @@ async function request<T>(
   return data as T;
 }
 
+/** Parse an error response body into an ApiError (for non-JSON/JSON error payloads). */
+async function httpError(res: Response, fallback: string): Promise<ApiError> {
+  const text = await res.text().catch(() => "");
+  let msg = fallback;
+  let issues: unknown;
+  if (text) {
+    try {
+      const data = JSON.parse(text) as { error?: string; issues?: unknown };
+      if (data.error) msg = data.error;
+      issues = data.issues;
+    } catch {
+      /* not JSON — keep the fallback message */
+    }
+  }
+  return new ApiError(res.status, msg, issues);
+}
+
 export const api = {
   // auth
   login: (username: string, password: string) =>
@@ -226,6 +243,49 @@ export const api = {
     occurredAt?: string;
   }) => request<Tx>("POST", "/ledger", body),
   deleteTransaction: (id: string) => request("DELETE", `/ledger/${id}`),
+  updateTransaction: (id: string, body: {
+    amount: string | number;
+    description?: string;
+    occurredAt?: string;
+    type?: string;
+    scoutId?: string;
+    leaderId?: string;
+    bankAccountId?: string;
+  }) => request<Tx>("PATCH", `/ledger/${id}`, body),
+
+  getBackup: async () => {
+    const token = getToken();
+    const res = await fetch(`/api/backup/export`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      throw await httpError(res, `Backup download failed (${res.status})`);
+    }
+    return res.blob();
+  },
+
+  importBackup: async (file: File) => {
+    const token = getToken();
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`/api/backup/import`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    if (!res.ok) {
+      throw await httpError(res, `Restore failed (${res.status})`);
+    }
+    const text = await res.text().catch(() => "");
+    try {
+      return text ? (JSON.parse(text) as unknown) : null;
+    } catch {
+      return null;
+    }
+  },
+
+  convertScoutToLeader: (scoutId: string, body: { position?: string }) =>
+    request<any>(`POST`, `/scouts/${scoutId}/convert-to-leader`, body),
 
   // events
   listEvents: () => request<TroopEvent[]>("GET", "/events"),
@@ -313,8 +373,6 @@ export const api = {
   toggleDuesEntry: (id: string) => request<DuesEntry>("PATCH", `/dues/${id}/toggle`),
   waiveDuesEntry: (id: string, waived: boolean, note?: string) =>
     request<DuesEntry>("PATCH", `/dues/${id}/waive`, { waived, note }),
-  bulkToggle: (ids: string[]) =>
-    request<DuesEntry[]>("POST", "/dues/bulk-toggle", { ids }),
   bulkMarkPaid: (ids: string[]) =>
     request<DuesEntry[]>("POST", "/dues/bulk-mark-paid", { ids }),
   generateDues: (cycleId: string) =>

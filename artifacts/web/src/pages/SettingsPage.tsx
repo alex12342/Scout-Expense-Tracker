@@ -38,6 +38,8 @@ export default function SettingsPage() {
   const [newPassword, setNewPassword] = useState("");
   const [newRole, setNewRole] = useState<"admin" | "leader">("leader");
   const [deleteUserId, setDeleteUserId] = useState<string | null>(null);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restoreConfirm, setRestoreConfirm] = useState(false);
 
   const isAdmin = user?.role === "admin";
 
@@ -109,6 +111,30 @@ export default function SettingsPage() {
       return;
     }
     changePwMut.mutate();
+  };
+
+  const handleDownloadBackup = async () => {
+    try {
+      const blob = await api.getBackup();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `scout-expense-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast(err.message || "Failed to download backup", "error");
+    }
+  };
+
+  const handleRestore = async (file: File) => {
+    try {
+      await api.importBackup(file);
+      toast("Backup restored successfully", "success");
+      window.location.reload();
+    } catch (err) {
+      toast((err as Error).message || "Import failed", "error");
+    }
   };
 
   return (
@@ -219,7 +245,64 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Data Management */}
+        <Card>
+          <CardContent className="pt-5">
+            <h2 className="mb-4 font-display text-sm font-semibold text-ink">Data Management</h2>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between rounded-lg border border-line p-4">
+                <div>
+                  <p className="text-sm font-medium text-ink">Download Backup</p>
+                    <p className="text-xs text-muted">Export all troop data into a zip archive you can restore later</p>
+                </div>
+                <Button size="sm" variant="outline" onClick={handleDownloadBackup}>
+                  Download Backup
+                </Button>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-line p-4">
+                <div>
+                  <p className="text-sm font-medium text-ink">Restore from Backup</p>
+                  <p className="text-xs text-muted">Upload a previously downloaded backup zip file</p>
+                </div>
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".zip"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        setRestoreFile(file);
+                        setRestoreConfirm(true);
+                      }
+                    }}
+                  />
+                  <span className="inline-flex items-center rounded-lg bg-ember px-3 py-2 text-sm font-medium text-white hover:bg-ember/90 cursor-pointer">
+                    Restore Backup
+                  </span>
+                </label>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Restore Confirmation */}
+      {restoreConfirm && restoreFile && (
+        <ConfirmDialog
+          open={restoreConfirm}
+          onClose={() => {
+            setRestoreConfirm(false);
+            setRestoreFile(null);
+          }}
+          onConfirm={() => handleRestore(restoreFile)}
+          title="Restore from Backup"
+          description="This will overwrite all current data with the contents of the backup. This cannot be undone."
+          confirmLabel="Restore"
+          destructive
+        />
+      )}
 
       {/* Add User Dialog */}
       <Dialog open={showAddUser} onClose={() => setShowAddUser(false)} title="Add Team Member" size="sm">

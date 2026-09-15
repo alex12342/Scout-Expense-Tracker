@@ -16,6 +16,8 @@ const router = Router();
 
 // GET / — troop-wide snapshot for the dashboard.
 router.get("/", requireAuth, async (_req, res) => {
+  // Paid-to-date per dues entry from the payment audit trail (partial payments).
+  const duesPaidSub = sql<number>`(select sum(dt.amount_cents) from dues_transactions dt where dt.dues_id = ${duesTable.id} and dt.action in ('payment','payment_recorded','partial_payment'))`;
   const [scouts, leaders, accounts, events, duesSummary] = await Promise.all([
     db.select().from(scoutsTable).orderBy(scoutsTable.name),
     db.select().from(leadersTable).orderBy(leadersTable.firstName),
@@ -24,14 +26,14 @@ router.get("/", requireAuth, async (_req, res) => {
     db
       .select({
         scoutTotalAssessed: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'scout' THEN ${duesTable.amountCents} ELSE 0 END),0)`,
-        scoutPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'scout' AND ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END),0)`,
-        scoutOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'scout' AND ${duesTable.isPaid} = false AND ${duesTable.isWaived} = false THEN ${duesTable.amountCents} ELSE 0 END),0)`,
+        scoutPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'scout' THEN CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0)) END ELSE 0 END),0)`,
+        scoutOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'scout' THEN CASE WHEN ${duesTable.isWaived} OR ${duesTable.isPaid} THEN 0 ELSE GREATEST(0, ${duesTable.amountCents} - LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0))) END ELSE 0 END),0)`,
         leaderTotalAssessed: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'leader' THEN ${duesTable.amountCents} ELSE 0 END),0)`,
-        leaderPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'leader' AND ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END),0)`,
-        leaderOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'leader' AND ${duesTable.isPaid} = false AND ${duesTable.isWaived} = false THEN ${duesTable.amountCents} ELSE 0 END),0)`,
+        leaderPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'leader' THEN CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0)) END ELSE 0 END),0)`,
+        leaderOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.memberType} = 'leader' THEN CASE WHEN ${duesTable.isWaived} OR ${duesTable.isPaid} THEN 0 ELSE GREATEST(0, ${duesTable.amountCents} - LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0))) END ELSE 0 END),0)`,
         totalAssessed: sql<number>`coalesce(sum(${duesTable.amountCents}),0)`,
-        totalPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE 0 END),0)`,
-        totalOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.isPaid} = false AND ${duesTable.isWaived} = false THEN ${duesTable.amountCents} ELSE 0 END),0)`,
+        totalPaid: sql<number>`coalesce(sum(CASE WHEN ${duesTable.isWaived} THEN 0 WHEN ${duesTable.isPaid} THEN ${duesTable.amountCents} ELSE LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0)) END),0)`,
+        totalOutstanding: sql<number>`coalesce(sum(CASE WHEN ${duesTable.isWaived} OR ${duesTable.isPaid} THEN 0 ELSE GREATEST(0, ${duesTable.amountCents} - LEAST(${duesTable.amountCents}, coalesce(${duesPaidSub}, 0))) END),0)`,
       })
       .from(duesTable),
   ]);

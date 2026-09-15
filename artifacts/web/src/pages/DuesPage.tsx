@@ -181,15 +181,6 @@ export default function DuesPage() {
     },
   });
 
-  const bulkToggleMut = useMutation({
-    mutationFn: (ids: string[]) => api.bulkToggle(ids),
-    onSuccess: () => {
-      if (selectedCycle) qc.invalidateQueries({ queryKey: ["dues-entries", selectedCycle] });
-      qc.invalidateQueries({ queryKey: ["dues-summary"] });
-      setSelectedIds(new Set());
-    },
-  });
-
   const recordPaymentMut = useMutation({
     mutationFn: ({ duesId, amountCents, bankAccountId }: { duesId: string; amountCents: number; bankAccountId: string }) =>
       api.recordDuesPayment(duesId, amountCents, bankAccountId),
@@ -269,10 +260,11 @@ export default function DuesPage() {
   };
 
   const getStatusBadge = (entry: DuesEntry) => {
-    let status = entry.isWaived ? "waived" : entry.isPaid ? "paid" : entry.dueDate ? (new Date(entry.dueDate) < new Date() ? "overdue" : "unpaid") : "unpaid";
     const amountPaid = entry.amountPaidCents ?? 0;
-    const remaining = entry.remainingCents ?? entry.amountCents - amountPaid;
-    if (amountPaid > 0 && remaining > 0) {
+    const remaining = entry.remainingCents ?? Math.max(0, entry.amountCents - amountPaid);
+    const fullyPaid = entry.amountCents > 0 && amountPaid >= entry.amountCents;
+    let status = entry.isWaived ? "waived" : entry.isPaid || fullyPaid ? "paid" : entry.dueDate ? (new Date(entry.dueDate) < new Date() ? "overdue" : "unpaid") : "unpaid";
+    if (!entry.isWaived && !entry.isPaid && !fullyPaid && amountPaid > 0 && remaining > 0) {
       status = "partial";
     }
     const variant = status === "paid" ? "success" : status === "partial" ? "warning" : status === "waived" ? "muted" : status === "overdue" ? "destructive" : "warning";
@@ -281,7 +273,8 @@ export default function DuesPage() {
 
   const openRecordPayment = (entry: DuesEntry) => {
     setEditingEntry(entry);
-    setPaymentAmount(String(Math.round(entry.amountCents / 100)));
+    const remaining = entry.remainingCents ?? Math.max(0, entry.amountCents - (entry.amountPaidCents ?? 0));
+    setPaymentAmount(String(Math.round(remaining / 100)));
     setPaymentBankId("");
     setShowRecordPayment(true);
   };
@@ -409,7 +402,7 @@ export default function DuesPage() {
                       <TableCell>{getStatusBadge(entry)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
-                          {!entry.isPaid && !entry.isWaived && (
+                            {!entry.isPaid && !entry.isWaived && (entry.remainingCents ?? Math.max(0, entry.amountCents - (entry.amountPaidCents ?? 0))) > 0 && (
                             <Button
                               variant="secondary"
                               size="sm"
@@ -452,7 +445,6 @@ export default function DuesPage() {
         <div className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg bg-ink px-4 py-3 text-sm text-surface shadow-lg">
           <span>{selectedIds.size} selected</span>
           <Button size="sm" onClick={() => bulkMarkPaidMut.mutate([...selectedIds])}>Mark Paid</Button>
-          <Button size="sm" variant="secondary" onClick={() => bulkToggleMut.mutate([...selectedIds])}>Toggle</Button>
           <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>Clear</Button>
         </div>
       )}

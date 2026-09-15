@@ -254,6 +254,61 @@ router.post("/", requireAuth, async (req, res) => {
       )
     ).flat();
 
+    // Check for positive balances and auto-apply as credit.
+    const creditRows: Array<{
+      scoutId: string | null;
+      leaderId: string | null;
+      creditCents: number;
+    }> = [];
+
+    for (const part of insertedParts) {
+      const key = part.scoutId ?? part.leaderId ?? "";
+      const estimated = participantEstimated[key] ?? 0;
+      if (estimated <= 0) continue;
+
+      let balanceCents = 0;
+      if (part.scoutId) {
+        const [bal] = await tx
+          .select({ total: sql<number>`coalesce(sum(${transactionsTable.amountCents}), 0)` })
+          .from(transactionsTable)
+          .where(eq(transactionsTable.scoutId, part.scoutId!));
+        balanceCents = Number(bal?.total ?? 0);
+      } else if (part.leaderId) {
+        const [bal] = await tx
+          .select({ total: sql<number>`coalesce(sum(${transactionsTable.amountCents}), 0)` })
+          .from(transactionsTable)
+          .where(eq(transactionsTable.leaderId, part.leaderId!));
+        balanceCents = Number(bal?.total ?? 0);
+      }
+
+      if (balanceCents > 0) {
+        const creditCents = Math.min(balanceCents, estimated);
+        if (creditCents > 0) {
+          creditRows.push({
+            scoutId: part.scoutId,
+            leaderId: part.leaderId,
+            creditCents,
+          });
+
+          await tx.update(eventParticipantsTable)
+            .set({ amountPaidCents: creditCents })
+            .where(eq(eventParticipantsTable.id, part.id));
+
+          await tx.insert(transactionsTable).values({
+            occurredAt: new Date(),
+            type: "scout_deposit" as const,
+            amountCents: creditCents,
+            scoutId: part.scoutId,
+            leaderId: part.leaderId,
+            eventId: event.id,
+            eventParticipantId: part.id,
+            description: `Credit applied from balance — ${name}`,
+            createdBy: req.userId,
+          });
+        }
+      }
+    }
+
     await tx.insert(transactionsTable).values(
       insertedParts.map((part) => {
         const key = part.scoutId ?? part.leaderId ?? "";
@@ -271,10 +326,11 @@ router.post("/", requireAuth, async (req, res) => {
       }),
     );
 
-    return { event, participants: insertedParts };
+    return { event, participants: insertedParts, creditRows };
   });
 
-  res.status(201).json(result);
+  const { event: createdEvent, participants: createdParts, creditRows: credits } = result;
+  res.status(201).json({ ...createdEvent, participants: createdParts, creditRows: credits });
 });
 
 // ── GET /:id — event detail ─────────────────────────────────────────────────
@@ -334,6 +390,7 @@ async function loadEvent(id: string) {
       leaderName: p.leaderName,
       estimatedOutstandingCents: p.part.estimatedAllocatedCents - p.part.amountPaidCents,
       outstandingCents: p.part.amountAllocatedCents - p.part.amountPaidCents,
+      creditAppliedCents: 0,
       status: paymentStatus(
         p.part.amountPaidCents,
         p.part.estimatedAllocatedCents,

@@ -12,13 +12,8 @@ import { hashPassword } from "./lib/password";
 import { validatePasswordStrength } from "./lib/password";
 
 async function main() {
-  const username = process.env.DEFAULT_ADMIN_USERNAME?.trim();
-  const password = process.env.DEFAULT_ADMIN_PASSWORD;
-
-  if (!username || !password) {
-    console.log("[seed] DEFAULT_ADMIN_USERNAME/PASSWORD not set — skipping admin seed");
-    return;
-  }
+  const username = (process.env.DEFAULT_ADMIN_USERNAME || "admin").trim();
+  const password = process.env.DEFAULT_ADMIN_PASSWORD || "ChangeMe123!";
 
   const [{ n }] = await db
     .select({ n: count() })

@@ -261,15 +261,19 @@ async function generateDuesSummaryReport(query: Record<string, unknown>) {
     typeof query.cycleId === "string" ? query.cycleId : undefined;
   const conditions = cycleId ? [eq(duesCyclesTable.id, cycleId)] : undefined;
 
+  // Paid includes partial payments (audit trail), capped at the assessed
+  // amount. Waived entries count toward waived, not paid/outstanding.
+  const paidSub = sql<number>`(select sum(dt.amount_cents) from dues_transactions dt where dt.dues_id = ${duesTable.id} and dt.action in ('payment','payment_recorded','partial_payment'))`;
   const cycles = await db
     .select({
       cycleId: duesCyclesTable.id,
       label: duesCyclesTable.label,
       isCurrent: duesCyclesTable.isCurrent,
       totalDue: sql<number>`coalesce(sum(${duesTable.amountCents}), 0)`,
-      totalPaid: sql<number>`coalesce(sum(case when ${duesTable.isPaid} then ${duesTable.amountCents} else 0 end), 0)`,
+      totalPaid: sql<number>`coalesce(sum(case when ${duesTable.isWaived} then 0 when ${duesTable.isPaid} then ${duesTable.amountCents} else LEAST(${duesTable.amountCents}, coalesce(${paidSub}, 0)) end), 0)`,
+      totalWaived: sql<number>`coalesce(sum(case when ${duesTable.isWaived} then ${duesTable.amountCents} else 0 end), 0)`,
       memberCount: sql<number>`count(${duesTable.id})`,
-      paidCount: sql<number>`count(case when ${duesTable.isPaid} then 1 end)`,
+      paidCount: sql<number>`count(case when ${duesTable.isPaid} or (${duesTable.isWaived} = false and ${duesTable.amountCents} > 0 and coalesce(${paidSub}, 0) >= ${duesTable.amountCents}) then 1 end)`,
     })
     .from(duesCyclesTable)
     .leftJoin(duesTable, eq(duesCyclesTable.id, duesTable.cycleId))
@@ -283,7 +287,8 @@ async function generateDuesSummaryReport(query: Record<string, unknown>) {
     isCurrent: c.isCurrent,
     totalDueCents: Number(c.totalDue),
     totalPaidCents: Number(c.totalPaid),
-    outstandingCents: Number(c.totalDue) - Number(c.totalPaid),
+    totalWaivedCents: Number(c.totalWaived ?? 0),
+    outstandingCents: Math.max(0, Number(c.totalDue) - Number(c.totalPaid) - Number(c.totalWaived ?? 0)),
     memberCount: Number(c.memberCount),
     paidCount: Number(c.paidCount),
   }));

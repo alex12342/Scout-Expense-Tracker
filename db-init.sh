@@ -57,6 +57,30 @@ SET first_name = split_part(btrim(name), ' ', 1),
 WHERE btrim(first_name) = '' AND btrim(name) <> '';
 SQL
 
+# --- One-time backfill: mark fully-covered dues entries as paid (idempotent) --
+# Partial payments are tracked in dues_transactions. Entries whose payments
+# already add up to the full amount were never flipped to is_paid=true by the
+# old single-payment logic. Flip them now. Safe to run every boot.
+echo "[db-init] Backfilling fully-paid dues entries (no-op if none)..."
+sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
+UPDATE dues d
+SET is_paid = true,
+    paid_at = COALESCE(
+      d.paid_at,
+      (SELECT max(dt.created_at) FROM dues_transactions dt
+       WHERE dt.dues_id = d.id
+         AND dt.action IN ('payment','payment_recorded','partial_payment')),
+      now()
+    ),
+    updated_at = now()
+WHERE d.is_paid = false
+  AND d.is_waived = false
+  AND d.amount_cents > 0
+  AND (SELECT COALESCE(sum(dt.amount_cents), 0) FROM dues_transactions dt
+       WHERE dt.dues_id = d.id
+         AND dt.action IN ('payment','payment_recorded','partial_payment')) >= d.amount_cents;
+SQL
+
 # --- Seed the initial admin (no-op if users already exist) ------------------
 echo "[db-init] Seeding admin user (no-op if present)..."
 if node /app/artifacts/api-server/dist/seed-admin.mjs; then

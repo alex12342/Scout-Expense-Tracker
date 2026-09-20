@@ -331,6 +331,19 @@ export const api = {
     },
   ) => request("POST", `/events/${id}/refunds`, body),
 
+  finalizeEvent: (
+    id: string,
+    body: {
+      actualTotalCents?: number;
+      participants: Array<{
+        participantId: string;
+        status: "registered" | "dropped_full_refund" | "dropped_fee_assessed" | "attended";
+        isManualOverride: boolean;
+        overrideAmountCents?: number | null;
+      }>;
+    },
+  ) => request("POST", `/events/${id}/finalize`, body),
+
   // dashboard
   dashboard: () => request<Dashboard>("GET", "/dashboard"),
 

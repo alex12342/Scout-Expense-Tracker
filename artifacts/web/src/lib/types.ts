@@ -63,9 +63,18 @@ export type TxType =
   | "event_allocation"
   | "event_payment"
   | "event_refund"
+  | "event_true_up"
   | "bank_expense"
   | "bank_adjustment"
   | "scout_adjustment";
+
+export type EventStatus = "active" | "finalized";
+
+export type EventParticipantStatus =
+  | "registered"
+  | "dropped_full_refund"
+  | "dropped_fee_assessed"
+  | "attended";
 
 export interface Tx {
   id: string;
@@ -98,6 +107,7 @@ export interface TroopEvent {
   outstandingCents?: number;
   participantCount?: number;
   isPaid?: boolean;
+  status?: EventStatus;
 }
 
 export type PaymentStatus = "unpaid" | "partial" | "paid";
@@ -110,11 +120,16 @@ export interface EventParticipant {
   amountAllocatedCents: number;
   estimatedAllocatedCents: number;
   amountPaidCents: number;
+  // Attendance / commitment state (see EventParticipantStatus).
+  status?: EventParticipantStatus;
+  isManualOverride?: boolean;
+  overrideAmountCents?: number | null;
   scoutName?: string | null;
   leaderName?: string | null;
   estimatedOutstandingCents?: number;
   outstandingCents?: number;
-  status?: string;
+  // Payment state (distinct from the attendance `status` above).
+  paymentStatus?: "unpaid" | "partial" | "paid";
 }
 
 export interface Dashboard {
@@ -255,6 +270,7 @@ export interface TroopEvent {
   outstandingCents?: number;
   participantCount?: number;
   isPaid?: boolean;
+  status?: EventStatus;
   fields: EventField[];
 }
 

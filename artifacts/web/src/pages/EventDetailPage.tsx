@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useParams, Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { formatMoney, formatDateTime, parseMoney } from "../lib/money";
+import { formatMoney, formatDateTime, parseMoney, evenSplit } from "../lib/money";
 import {
   Badge,
   Button,
@@ -15,6 +15,7 @@ import {
   Select,
   Spinner,
   StatCard,
+  Switch,
   Table,
   TableBody,
   TableCell,
@@ -23,7 +24,7 @@ import {
   TableRow,
   useToast,
 } from "../components/ui";
-import type { EventField, EventParticipant, EventLineItem } from "../lib/types";
+import type { EventField, EventParticipant, EventLineItem, EventParticipantStatus } from "../lib/types";
 
 export default function EventDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -40,6 +41,12 @@ export default function EventDetailPage() {
   const [savingFields, setSavingFields] = useState(false);
   const [showUpdateCosts, setShowUpdateCosts] = useState(false);
   const [lineItems, setLineItems] = useState<EventLineItem[]>([]);
+  const [showFinalize, setShowFinalize] = useState(false);
+  const [finalStatuses, setFinalStatuses] = useState<Record<string, EventParticipantStatus>>({});
+  const [finalOverrides, setFinalOverrides] = useState<
+    Record<string, { enabled: boolean; amount: string }>
+  >({});
+  const [actualTotalInput, setActualTotalInput] = useState("");
 
   const { data: event, isLoading } = useQuery({
     queryKey: ["events", id],
@@ -148,6 +155,46 @@ export default function EventDetailPage() {
     onError: (err) => toast(err.message, "error"),
   });
 
+  // Finalization (estimate → actual true-up). Hook lives here (top) to keep the
+  // Rules-of-Hooks order stable; the mutation reads live state when invoked.
+  const finalizeMut = useMutation({
+    mutationFn: () => {
+      if (!event) throw new Error("Event not loaded");
+      const actualTotal = parseMoney(actualTotalInput);
+      if (actualTotal == null) throw new Error("Enter a valid actual total");
+      const overrideAmt = (pid: string): number | null => {
+        const o = finalOverrides[pid];
+        if (!o?.enabled) return null;
+        const amt = parseMoney(o.amount);
+        return amt != null && amt >= 0 ? amt : null;
+      };
+      return api.finalizeEvent(id!, {
+        actualTotalCents: actualTotal,
+        participants: (event.participants ?? []).map((p) => {
+          const ov = overrideAmt(p.id);
+          return {
+            participantId: p.id,
+            status: (finalStatuses[p.id] ?? "registered") as
+              | "registered"
+              | "dropped_full_refund"
+              | "dropped_fee_assessed"
+              | "attended",
+            isManualOverride: ov != null,
+            overrideAmountCents: ov != null ? ov : null,
+          };
+        }),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["events"] });
+      qc.invalidateQueries({ queryKey: ["events", id] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast("Event finalized", "success");
+      setShowFinalize(false);
+    },
+    onError: (err) => toast(err.message, "error"),
+  });
+
   if (isLoading) {
     return <div className="flex justify-center py-10"><Spinner className="h-6 w-6 text-pine" /></div>;
   }
@@ -157,6 +204,56 @@ export default function EventDetailPage() {
   const participants = event.participants ?? [];
   const estimatedTotal = (event as { estimatedTotalCents?: number }).estimatedTotalCents ?? 0;
   const outstanding = (event.outstandingCents ?? 0);
+  const isFinalized = (event as { status?: string }).status === "finalized";
+
+  // ── Finalization (estimate → actual true-up) ─────────────────────────────
+  const isBearer = (s: EventParticipantStatus) =>
+    s === "attended" || s === "dropped_fee_assessed" || s === "registered";
+
+  const openFinalize = () => {
+    const statuses: Record<string, EventParticipantStatus> = {};
+    const overrides: Record<string, { enabled: boolean; amount: string }> = {};
+    for (const p of participants) {
+      const s = (p.status as EventParticipantStatus) ?? "registered";
+      statuses[p.id] = s === "registered" ? "attended" : s;
+      overrides[p.id] = { enabled: false, amount: "" };
+    }
+    setFinalStatuses(statuses);
+    setFinalOverrides(overrides);
+    setActualTotalInput((estimatedTotal / 100).toFixed(2));
+    setShowFinalize(true);
+  };
+
+  const overrideAmount = (pid: string): number | null => {
+    const o = finalOverrides[pid];
+    if (!o?.enabled) return null;
+    const amt = parseMoney(o.amount);
+    return amt != null && amt >= 0 ? amt : null;
+  };
+
+  const preview = (() => {
+    const actualTotal = parseMoney(actualTotalInput) ?? estimatedTotal;
+    const bearers = participants.filter((p) => isBearer(finalStatuses[p.id] ?? "registered"));
+    const overrideSum = bearers.reduce((s, p) => s + (overrideAmount(p.id) ?? 0), 0);
+    const remainder = actualTotal - overrideSum;
+    const nonOverride = bearers.filter((p) => overrideAmount(p.id) == null);
+    const shares = nonOverride.length > 0 ? evenSplit(remainder, nonOverride.length) : [];
+    const finalShareFor = (p: EventParticipant): number => {
+      const st = finalStatuses[p.id] ?? "registered";
+      if (!isBearer(st)) return 0;
+      const ov = overrideAmount(p.id);
+      if (ov != null) return ov;
+      return shares[nonOverride.indexOf(p)] ?? 0;
+    };
+    return {
+      actualTotal,
+      rows: participants.map((p) => {
+        const st = finalStatuses[p.id] ?? "registered";
+        const finalShare = finalShareFor(p);
+        return { p, status: st, finalShare, delta: p.estimatedAllocatedCents - finalShare };
+      }),
+    };
+  })();
 
   // CSV export
   const exportCSV = () => {
@@ -189,7 +286,12 @@ export default function EventDetailPage() {
         title={event.name}
         description={`${new Date(event.eventDate).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${event.description ? ` · ${event.description}` : ""}`}
         actions={
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            {isFinalized ? (
+              <Badge variant="success">Finalized</Badge>
+            ) : (
+              <Button onClick={openFinalize}>Finalize Event</Button>
+            )}
             <Button variant="outline" onClick={() => setShowFields(true)}>Edit Fields</Button>
             <Button variant="outline" onClick={() => setShowUpdateCosts(true)}>Update Costs</Button>
             <Button variant="outline" onClick={exportCSV}>Export CSV</Button>
@@ -200,7 +302,11 @@ export default function EventDetailPage() {
 
       {/* Stats */}
       <div className="mb-6 grid grid-cols-3 gap-4">
-        <StatCard label="Estimated Total" value={formatMoney(estimatedTotal)} />
+        {isFinalized ? (
+          <StatCard label="Actual Total" value={formatMoney(event.totalCostCents ?? 0)} />
+        ) : (
+          <StatCard label="Estimated Total" value={formatMoney(estimatedTotal)} />
+        )}
         <StatCard label="Collected" value={formatMoney(event.totalPaidCents ?? 0)} tone="positive" />
         <StatCard label="Outstanding" value={formatMoney(outstanding)} tone={outstanding > 0 ? "negative" : "positive"} />
       </div>
@@ -550,6 +656,121 @@ export default function EventDetailPage() {
           <Button variant="ghost" onClick={() => setRefundScoutId(null)}>Cancel</Button>
           <Button variant="destructive" onClick={() => refundMut.mutate()} disabled={refundMut.isPending}>
             {refundMut.isPending ? "Processing…" : "Record Refund"}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Finalize Dialog — estimate-to-actual reconciliation */}
+      <Dialog open={showFinalize} onClose={() => setShowFinalize(false)} title="Finalize Event" size="lg">
+        <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+          <p className="text-sm text-muted">
+            Mark who attended, apply any custom cost or scholarship, and set the actual total.
+            Finalizing records a reconciliation true-up per participant and locks the event.
+          </p>
+
+          <Input
+            label="Actual Total ($)"
+            type="number"
+            step="0.01"
+            min="0"
+            value={actualTotalInput}
+            onChange={(e) => setActualTotalInput(e.target.value)}
+            placeholder={(estimatedTotal / 100).toFixed(2)}
+            prefix="$"
+          />
+          <p className="-mt-2 text-xs text-muted">
+            Defaults to the estimate ({formatMoney(estimatedTotal)}). After custom costs, the
+            remainder is split evenly across attending participants.
+          </p>
+
+          <div className="space-y-2">
+            {preview.rows.map((r) => {
+              const name = r.p.scoutName ?? r.p.leaderName ?? "Unknown";
+              const ov = finalOverrides[r.p.id] ?? { enabled: false, amount: "" };
+              return (
+                <div key={r.p.id} className="rounded-lg border border-line p-3">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                    <span className="w-40 shrink-0 truncate text-sm font-medium text-ink" title={name}>
+                      {name}
+                    </span>
+                    <div className="w-56">
+                      <Select
+                        value={finalStatuses[r.p.id] ?? "attended"}
+                        onChange={(e) =>
+                          setFinalStatuses({
+                            ...finalStatuses,
+                            [r.p.id]: e.target.value as EventParticipantStatus,
+                          })
+                        }
+                        options={[
+                          { value: "attended", label: "Attended" },
+                          { value: "dropped_fee_assessed", label: "Dropped – Fee Assessed" },
+                          { value: "dropped_full_refund", label: "Dropped – Full Refund" },
+                        ]}
+                        aria-label={`Status for ${name}`}
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-ink-soft">
+                      <Switch
+                        checked={ov.enabled}
+                        onChange={(c) =>
+                          setFinalOverrides({ ...finalOverrides, [r.p.id]: { ...ov, enabled: c } })
+                        }
+                        id={`ov-${r.p.id}`}
+                      />
+                      Custom cost
+                    </label>
+                    {ov.enabled && (
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={ov.amount}
+                        onChange={(e) =>
+                          setFinalOverrides({ ...finalOverrides, [r.p.id]: { ...ov, amount: e.target.value } })
+                        }
+                        placeholder="0.00"
+                        prefix="$"
+                        className="w-28"
+                        aria-label={`Custom cost for ${name}`}
+                      />
+                    )}
+                    <span className="ml-auto text-right">
+                      <span className="block text-xs text-muted">Final</span>
+                      <span className="font-mono text-sm tnum text-ink">{formatMoney(r.finalShare)}</span>
+                    </span>
+                    <span className="w-24 text-right">
+                      <span className="block text-xs text-muted">True-up</span>
+                      <span
+                        className={`font-mono text-sm tnum ${
+                          r.delta < 0 ? "text-ember" : r.delta > 0 ? "text-moss" : "text-muted"
+                        }`}
+                      >
+                        {formatMoney(r.delta, { sign: true })}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-pine-soft/40 px-3 py-2 text-sm">
+            <span className="text-ink-soft">
+              Actual {formatMoney(preview.actualTotal)} · Custom{" "}
+              {formatMoney(preview.rows.reduce((s, r) => s + (overrideAmount(r.p.id) ?? 0), 0))}
+            </span>
+            <span className="font-mono tnum text-ink">
+              Net true-up {formatMoney(preview.rows.reduce((s, r) => s + r.delta, 0), { sign: true })}
+            </span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setShowFinalize(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => finalizeMut.mutate()} disabled={finalizeMut.isPending}>
+            {finalizeMut.isPending ? "Finalizing…" : "Finalize Event"}
           </Button>
         </DialogFooter>
       </Dialog>

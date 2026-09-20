@@ -19,9 +19,10 @@ import { usersTable } from "./users";
  *   opening_balance    ± (scout)      ± (account)
  *   scout_deposit      + (paid in)    + (money in)
  *   reimbursement      - (paid out)   - (money out)
- *   event_allocation   - (now owes)   — (no cash yet)
- *   event_payment      + (paid share) + (money in)
- *   event_refund       - (share back) - (money out)
+  *   event_allocation   - (now owes)   — (no cash yet)
+  *   event_payment      + (paid share) + (money in)
+  *   event_refund       - (share back) - (money out)
+  *   event_true_up      ± (reconcile)  — (estimate -> actual delta)
  *   bank_expense       —              - (money out)
  *   bank_adjustment    —              ± (correction)
  *   scout_adjustment   ± (correction) —
@@ -39,6 +40,7 @@ export const TRANSACTION_TYPES = [
   "event_allocation",
   "event_payment",
   "event_refund",
+  "event_true_up",
   "bank_expense",
   "bank_adjustment",
   "scout_adjustment",

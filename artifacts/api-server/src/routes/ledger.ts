@@ -217,7 +217,8 @@ router.patch("/:id", requireAuth, async (req, res) => {
   if (
     tx.type === "event_allocation" ||
     tx.type === "event_payment" ||
-    tx.type === "event_refund"
+    tx.type === "event_refund" ||
+    tx.type === "event_true_up"
   ) {
     res.status(409).json({
       error: "Event transactions can't be edited directly.",
@@ -292,7 +293,8 @@ router.delete("/:id", requireAuth, async (req, res) => {
   if (
     tx.type === "event_allocation" ||
     tx.type === "event_payment" ||
-    tx.type === "event_refund"
+    tx.type === "event_refund" ||
+    tx.type === "event_true_up"
   ) {
     res.status(409).json({
       error:

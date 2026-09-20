@@ -14,7 +14,8 @@ import {
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { evenSplitCents, parseMoneyToCents } from "../lib/money";
-import { EVENT_LINE_ITEM_PARTICIPANT_TYPES } from "@scout-expense-tracker/db";
+import { EVENT_LINE_ITEM_PARTICIPANT_TYPES, EVENT_PARTICIPANT_STATUSES } from "@scout-expense-tracker/db";
+import type { EventParticipantStatus } from "@scout-expense-tracker/db";
 
 const router = Router();
 
@@ -391,7 +392,8 @@ async function loadEvent(id: string) {
       estimatedOutstandingCents: p.part.estimatedAllocatedCents - p.part.amountPaidCents,
       outstandingCents: p.part.amountAllocatedCents - p.part.amountPaidCents,
       creditAppliedCents: 0,
-      status: paymentStatus(
+      // `status` (above, from p.part) is the attendance state; this is payment state.
+      paymentStatus: paymentStatus(
         p.part.amountPaidCents,
         p.part.estimatedAllocatedCents,
       ),
@@ -775,6 +777,140 @@ router.post("/:id/refunds", requireAuth, async (req, res) => {
   res.status(201).json(result);
 });
 
+// ── POST /:id/finalize — estimate-to-actual reconciliation (true-up) ────────
+//
+// Reconciles the frozen estimate to the final cost WITHOUT touching any past
+// event_allocation rows (immutability). For each participant the effective
+// share moves from `estimatedAllocatedCents` to a final share; the delta is
+// written as a single signed `event_true_up` transaction so the ledger ends up
+// exactly at −finalShare. Balances stay computed via SUM() over transactions.
+
+const finalizeParticipantSchema = z.object({
+  participantId: z.string().uuid(),
+  status: z.enum(EVENT_PARTICIPANT_STATUSES),
+  isManualOverride: z.boolean(),
+  // Integer cents; the final share when isManualOverride is true (scholarship=0).
+  overrideAmountCents: z.number().int().min(0).nullable().optional(),
+});
+
+const finalizeSchema = z.object({
+  // Reconciled ACTUAL total. Optional — defaults to the current estimate.
+  actualTotalCents: z.number().int().min(0).optional(),
+  participants: z.array(finalizeParticipantSchema).min(1),
+});
+
+// `registered` is the pre-finalization default and is treated as `attended`.
+const isCostBearer = (s: EventParticipantStatus) =>
+  s === "attended" || s === "dropped_fee_assessed" || s === "registered";
+
+router.post("/:id/finalize", requireAuth, async (req, res) => {
+  const parsed = finalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid finalization", issues: parsed.error.flatten() });
+    return;
+  }
+  const { actualTotalCents, participants } = parsed.data;
+
+  const event = await loadEvent(String(req.params.id));
+  if (!event) {
+    res.status(404).json({ error: "Event not found" });
+    return;
+  }
+  if (event.status === "finalized") {
+    res.status(409).json({ error: "Event is already finalized" });
+    return;
+  }
+
+  const requested = new Map(participants.map((p) => [p.participantId, p]));
+  const statusOf = (id: string): EventParticipantStatus =>
+    requested.get(id)?.status ??
+    ((event.participants.find((p) => p.id === id)?.status as
+      | EventParticipantStatus
+      | undefined) ?? "registered");
+
+  // Effective cost bearers (attended / fee-assessed / registered→attended).
+  const bearers = event.participants.filter((p) => isCostBearer(statusOf(p.id)));
+
+  // Overrides take their explicit final share; the rest split the remainder.
+  const hasOverride = (id: string) => {
+    const r = requested.get(id);
+    return !!(r && r.isManualOverride && r.overrideAmountCents != null);
+  };
+  const overrideSum = bearers.reduce(
+    (s, p) => s + (hasOverride(p.id) ? requested.get(p.id)!.overrideAmountCents! : 0),
+    0,
+  );
+
+  const estimatedTotal = event.participants.reduce(
+    (s, p) => s + p.estimatedAllocatedCents,
+    0,
+  );
+  const totalActual = actualTotalCents ?? estimatedTotal;
+  const remainder = totalActual - overrideSum;
+  const nonOverride = bearers.filter((p) => !hasOverride(p.id));
+  const evenShares =
+    nonOverride.length > 0 ? evenSplitCents(remainder, nonOverride.length) : [];
+
+  const finalShareById = new Map<string, number>();
+  for (const p of event.participants) {
+    const st = statusOf(p.id);
+    if (!isCostBearer(st)) {
+      finalShareById.set(p.id, 0); // dropped_full_refund → owes nothing
+      continue;
+    }
+    if (hasOverride(p.id)) {
+      finalShareById.set(p.id, requested.get(p.id)!.overrideAmountCents!);
+    } else {
+      const i = nonOverride.indexOf(p);
+      finalShareById.set(p.id, evenShares[i] ?? 0);
+    }
+  }
+
+  await db.transaction(async (tx) => {
+    for (const p of event.participants) {
+      const r = requested.get(p.id);
+      const st = statusOf(p.id);
+      const finalShare = finalShareById.get(p.id) ?? 0;
+      const delta = p.estimatedAllocatedCents - finalShare;
+
+      await tx
+        .update(eventParticipantsTable)
+        .set({
+          status: st,
+          isManualOverride: r?.isManualOverride ?? false,
+          overrideAmountCents: r?.isManualOverride ? r.overrideAmountCents ?? 0 : null,
+          amountAllocatedCents: finalShare,
+        })
+        .where(eq(eventParticipantsTable.id, p.id));
+
+      if (delta !== 0) {
+        await tx.insert(transactionsTable).values({
+          occurredAt: new Date(),
+          type: "event_true_up" as const,
+          amountCents: delta, // negative = owes more, positive = credit/refund
+          scoutId: p.scoutId,
+          leaderId: p.leaderId,
+          eventId: event.id,
+          eventParticipantId: p.id,
+          description: `Reconciliation — ${event.name}`,
+          createdBy: req.userId,
+        });
+      }
+    }
+
+    await tx
+      .update(eventsTable)
+      .set({
+        status: "finalized" as const,
+        totalCostCents: totalActual,
+        updatedAt: new Date(),
+      })
+      .where(eq(eventsTable.id, event.id));
+  });
+
+  res.json(await loadEvent(event.id));
+});
+
 // ── DELETE /:id — void event (blocked once payments recorded) ───────────────
 
 router.delete("/:id", requireAuth, async (req, res) => {
@@ -798,7 +934,7 @@ router.delete("/:id", requireAuth, async (req, res) => {
       .where(
         and(
           eq(transactionsTable.eventId, event.id),
-          inArray(transactionsTable.type, ["event_allocation"]),
+          inArray(transactionsTable.type, ["event_allocation", "event_true_up"]),
         ),
       );
     await tx

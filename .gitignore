@@ -2,6 +2,7 @@
 .git
 .idea
 .vscode
+.opencode
 
 # Dependencies
 node_modules
@@ -33,3 +34,6 @@ pnpm-debug.log*
 .turbo
 .playwright-mcp
 .codebase-memory
+
+# Local release helper (prompts for credentials at runtime — never commit)
+scripts/release.sh

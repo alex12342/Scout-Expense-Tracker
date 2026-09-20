@@ -25,6 +25,30 @@ export type EventCostChangeAction = (typeof EVENT_COST_CHANGE_ACTIONS)[number];
 export const EVENT_LINE_ITEM_PARTICIPANT_TYPES = ["scout", "leader", "everyone"] as const;
 export type EventLineItemParticipantType = (typeof EVENT_LINE_ITEM_PARTICIPANT_TYPES)[number];
 
+/**
+ * Lifecycle of an event. `active` = still being reconciled; `finalized` = the
+ * estimate-to-actual true-up has been applied and no further true-ups are
+ * allowed (re-finalize is blocked).
+ */
+export const EVENT_STATUSES = ["active", "finalized"] as const;
+export type EventStatus = (typeof EVENT_STATUSES)[number];
+
+/**
+ * Per-participant attendance/commitment state at reconciliation time.
+ *   registered           – default; treated as `attended` at finalize
+ *   attended             – bore the cost
+ *   dropped_fee_assessed – left late but still owes their share
+ *   dropped_full_refund  – left in time; owes nothing (full credit)
+ * Eligible cost bearers = attended + dropped_fee_assessed (+ registered→attended).
+ */
+export const EVENT_PARTICIPANT_STATUSES = [
+  "registered",
+  "dropped_full_refund",
+  "dropped_fee_assessed",
+  "attended",
+] as const;
+export type EventParticipantStatus = (typeof EVENT_PARTICIPANT_STATUSES)[number];
+
 export interface EventField {
   key: string;
   value: string;
@@ -42,7 +66,14 @@ export const eventsTable = pgTable("events", {
   eventDate: date("event_date", { mode: "string" }).notNull(),
   description: text("description"),
   // The troop's total cost for the event (the amount to split across participants).
+  // Before finalization this is 0 / the estimate; on finalize it holds the
+  // reconciled ACTUAL total. Balances are always computed from transactions.
   totalCostCents: integer("total_cost_cents").notNull().default(0),
+  // Lifecycle: `active` (reconciling) -> `finalized` (true-up applied, locked).
+  status: varchar("status", { length: 16 })
+    .notNull()
+    .$type<EventStatus>()
+    .default("active"),
   // Optional user-defined key/value fields (e.g. "Location", "Counselor on duty").
   fields: jsonb("fields").$type<EventField[]>().default([]),
   createdBy: uuid("created_by").references(() => usersTable.id, {
@@ -77,6 +108,18 @@ export const eventParticipantsTable = pgTable(
       .notNull()
       .default(0),
     amountPaidCents: integer("amount_paid_cents").notNull().default(0),
+    // Attendance / commitment state (see EVENT_PARTICIPANT_STATUSES).
+    status: varchar("status", { length: 32 })
+      .notNull()
+      .$type<EventParticipantStatus>()
+      .default("registered"),
+    // Treasurer manually overrode this participant's final share (scholarship
+    // = 0, custom cost = N). When true, `overrideAmountCents` is their final
+    // share and they are excluded from the even split of the remainder.
+    isManualOverride: boolean("is_manual_override").notNull().default(false),
+    // Integer cents (nullable): the manually-set final share. Null when no
+    // override is active. Kept as integer cents to match every other money column.
+    overrideAmountCents: integer("override_amount_cents"),
     createdAt: createdAt,
   },
   (t) => [

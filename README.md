@@ -1,5 +1,11 @@
 # Trailhead Ledger — Scout Expense Tracker
 
+> **⚠ Alpha software — under active development.**
+> This project is still in **alpha**. Features, behavior, and the data model may
+> change between releases without notice, and the software carries no guarantees
+> of stability or support. If you use it in production, back up your data folder
+> regularly and expect to adapt to breaking changes as the project matures.
+
 A self-hosted web app for tracking a Boy Scout troop's finances: **scout ledgers**, **troop bank accounts**, and **events with per-scout cost splits**.
 
 Everything runs in a **single Docker container** — the database (PostgreSQL), the API, and the web UI are all inside it. You only ever expose **one port**. SSL is handled by your router/reverse proxy, not the container.
